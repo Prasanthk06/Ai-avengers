@@ -147,9 +147,10 @@ client.on('auth_failure', () => {
 
 
 // Generate QR Code
-client.on('qr', qr => {
-    qrcode.generate(qr, {small: true});
-    console.log('QR Code generated! Scan it with your WhatsApp');
+client.on('qr', async qr => {
+    console.log('\n\n');
+    console.log('QR Code URL:', await qrcode.toDataURL(qr));
+    console.log('\n\n');
 });
 
 // When client is ready
