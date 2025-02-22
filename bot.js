@@ -130,9 +130,15 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-features=site-per-process',
+            '--disable-web-security'
         ],
-        headless: true
+        headless: true,
+        timeout: 60000,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false
     }
 });
 
