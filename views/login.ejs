@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Flip Card Sign In / Sign Up</title>
+  <link rel="stylesheet" href="/stylesheets/login.css" />
+</head>
+<body>
+
+  <!-- OPTIONAL TOP NAV OR LOGO -->
+  <!-- <header class="top-nav">
+    <div class="logo">MyApp</div>
+  </header> -->
+
+  <!-- BACKGROUND ILLUSTRATIONS -->
+  <div class="bg-illustrations">
+    <!-- Bottom Left Illustration -->
+    <img 
+      src="./images/img1.svg" 
+      alt="Illustration Left" 
+      class="bottom-illustration left-illustration"
+    />
+    <!-- Bottom Right Illustration -->
+    <img 
+      src="./images/img2.svg" 
+      alt="Illustration Right" 
+      class="bottom-illustration right-illustration"
+    />
+  </div>
+
+  <!-- FLIP CARD CONTAINER -->
+  <div class="flip-container" id="flip-container">
+    
+    <!-- SIGN IN SIDE -->
+    <div class="flip-card sign-in-side">
+      <h2 class="title">Welcome back <span class="wave">👋</span></h2>
+
+      <form class="form sign-in-form">
+        <label for="signin-email">Email</label>
+        <input type="email" id="signin-email" placeholder="Enter your email" id="email" required>
+
+        <label for="signin-password">Unique Code</label>
+        <div class="password-wrapper">
+          <input type="text" id="signin-password" placeholder="Enter your Unique Code" required/>
+          <span class="toggle-visibility">👁</span>
+        </div>
+
+        <div class="extras">
+          <label class="checkbox-label">
+            <input type="checkbox" />
+            Keep me logged in
+          </label>
+          <a href="#" class="forgot-link" id="forgotCodeLink">Forgot Unique Code?</a>
+        </div>
+
+        <button type="submit" class="btn submit-btn">Sign In</button>
+
+        <p class="divider-text">OR</p>
+
+        <div class="social-logins">
+          <button class="social-btn google">G</button>
+          <button class="social-btn facebook">f</button>
+          <button class="social-btn apple"></button>
+        </div>
+
+        <p class="switch-text">
+          Not a member yet? 
+          <a href="#" id="flip-to-signup">Register now</a>
+        </p>
+      </form>
+    </div>
+    <div id="loginMessage" class="message"></div>
+
+    <!-- SIGN UP SIDE -->
+    <div class="flip-card sign-up-side">
+      <button class="close-icon">&times;</button> <!-- Optional corner "close" icon -->
+      <h2 class="title">Welcome.</h2>
+      <p class="subtitle">Create an account</p>
+
+      <form class="form sign-up-form">
+        <label for="signup-email">Email</label>
+        <input 
+          type="email" 
+          id="signup-email" 
+          placeholder="example@email.com"
+          required
+        />
+
+        <label for="signup-password">Name</label>
+        <div class="password-wrapper">
+          <input 
+            type="text" 
+            id="signup-name" 
+            placeholder="Enter Your Name" 
+            required
+          />
+          <span class="toggle-visibility">👁</span>
+        </div>
+
+        <div class="extras">
+          <label class="checkbox-label">
+            <input type="checkbox" required/>
+            I agree with Terms & Conditions
+          </label>
+        </div>
+
+        <button type="submit" class="btn submit-btn">Sign Up</button>
+
+        <p class="divider-text">Or sign up with</p>
+
+        <div class="social-logins">
+          <button class="social-btn google">G</button>
+          <button class="social-btn facebook">f</button>
+        </div>
+
+        <p class="switch-text">
+          Already have an account? 
+          <a href="#" id="flip-to-signin">Sign in</a>
+        </p>
+      </form>
+    </div>
+    <div id="signupMessage" class="message"></div>
+
+  </div> <!-- /flip-container -->
+
+  <script src="/javascripts/login.js"></script>
+</body>
+</html>

@@ -1,0 +1,369 @@
+/* RESET & GLOBAL STYLES */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  }
+  
+  body {
+    display: flex;
+    height: 100vh;
+    background: #f4f4f4;
+    color: #333;
+  }
+  
+  /* SIDEBAR */
+  .sidebar {
+    width: 270px;
+    background-color: #fff;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #e1e1e1;
+    transition: transform 0.3s ease-in-out;
+  }
+  
+  /* By default, sidebar is visible on larger screens.
+     On small screens, we shift it off-screen */
+  @media (max-width: 768px) {
+    .sidebar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 100%;
+      transform: translateX(-100%);
+      z-index: 200;
+    }
+    .sidebar.active {
+      transform: translateX(0);
+    }
+  }
+  
+  /* Sidebar Top Section */
+  .sidebar-top {
+    padding: 20px;
+  }
+  
+  /* Logo */
+
+  .pacifico-regular  {
+    font-family: "Pacifico", serif;
+    font-weight: 400;
+    font-style: normal;
+}
+
+  .logo {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 25px;
+  }
+  
+  /* Profile Section */
+  .profile-section {
+    display: flex;
+    align-items: center;
+    margin-bottom: 25px;
+  }
+  
+  .profile-picture {
+    width: 55px;
+    height: 55px;
+    border-radius: 50%;
+    background-color: #ddd;
+    margin-right: 15px;
+    object-fit: fill;
+  }
+  
+  .profile-name {
+    font-size: 16px;
+    font-weight: 500;
+  }
+  
+  /* Menu */
+  .menu {
+    list-style-type: none;
+  }
+  
+  .menu li {
+    font-weight: bold;
+    padding: 10px 0;
+    font-size: 15px;
+    cursor: pointer;
+    transition: color 0.2s ease;
+  }
+  
+  .menu li:hover {
+    color: #333;
+  }
+  
+  .menu li.active {
+    font-weight: bold;
+    color: #000;
+  }
+  
+  /* Logout Button */
+  .Btn {
+    margin-top: 170px;
+    margin-left: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    width: 45px;
+    height: 45px;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    transition-duration: .3s;
+    box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.199);
+    background-color: rgb(255, 65, 65);
+  }
+  
+  /* plus sign */
+  .sign {
+    width: 100%;
+    transition-duration: .3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  .sign svg {
+    width: 17px;
+  }
+  
+  .sign svg path {
+    fill: white;
+  }
+  /* text */
+  .text {
+    position: absolute;
+    right: 0%;
+    width: 0%;
+    opacity: 0;
+    color: white;
+    font-size: 1.2em;
+    font-weight: 600;
+    transition-duration: .3s;
+  }
+  /* hover effect on button width */
+  .Btn:hover {
+    width: 125px;
+    border-radius: 40px;
+    transition-duration: .3s;
+  }
+  
+  .Btn:hover .sign {
+    width: 30%;
+    transition-duration: .3s;
+    padding-left: 20px;
+  }
+  /* hover effect button's text */
+  .Btn:hover .text {
+    opacity: 1;
+    width: 70%;
+    transition-duration: .3s;
+    padding-right: 10px;
+  }
+  /* button click effect*/
+  .Btn:active {
+    transform: translate(2px ,2px);
+  }
+  /* MAIN CONTENT */
+  .main-content {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+  }
+  
+  /* Header */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 25px;
+  }
+  
+  .search {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+  }
+  
+  .sort {
+    padding: 10px 15px;
+    font-size: 14px;
+    border: 1px solid #ccc;
+    background: #fff;
+    cursor: pointer;
+    border-radius: 5px;
+    transition: background-color 0.2s ease;
+  }
+  
+  .sort:hover {
+    background-color: #eee;
+  }
+  
+  /* File Grid */
+  .file-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 15px;
+  }
+  
+  .file {
+    background: #fff;
+    padding: 15px;
+    text-align: center;
+    border-radius: 8px;
+    border: 1px solid #e1e1e1;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  }
+
+  .file:hover{
+    scale: 1.1;
+    cursor: pointer;
+  }
+  
+  .thumbnail {
+    width: 100%;
+    height: 100px;
+    background: #ddd;
+    border-radius: 5px;
+    margin-bottom: 10px;
+    position: relative;
+  }
+  
+  .thumbnail.pdf {
+    background-image: url('../images/pdf-icon.svg');
+    background-size: 50%;
+    background-repeat: no-repeat;
+    background-position: center;
+    background-color: #f8f9fa;
+}
+
+.file-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    max-width: 80%;
+    max-height: 80%;
+    position: relative;
+}
+
+.preview-area {
+    max-height: 70vh;
+    overflow: auto;
+}
+
+.preview-area img, 
+.preview-area iframe {
+    max-width: 100%;
+    height: auto;
+}
+
+.modal-buttons {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+.close-modal {
+    position: absolute;
+    right: 10px;
+    top: 10px;
+    cursor: pointer;
+    font-size: 24px;
+}
+
+
+  .thumbnail.video::before {
+    content: "▶";
+    font-size: 24px;
+    color: #666;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  
+  .thumbnail.image {
+    background: #ccc;
+  }
+  
+  .file p {
+    font-size: 14px;
+    color: #555;
+    line-height: 1.4;
+  }
+  
+  .sort-container {
+    position: relative;
+}
+
+.sort-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    z-index: 100;
+}
+
+.sort-dropdown.active {
+    display: block;
+}
+
+.sort-option {
+    padding: 10px 15px;
+    cursor: pointer;
+}
+
+.sort-option:hover {
+    background: #f5f5f5;
+}
+
+
+  /* MENU BUTTON (visible only on small screens) */
+  .menu-btn {
+    display: none;
+    position: fixed;
+    top: 15px;
+    left: 15px;
+    z-index: 250;
+    font-size: 28px;
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+  
+  /* Show menu button on small screens */
+  @media (max-width: 768px) {
+    .menu-btn {
+      display: block;
+    }
+  }
+  

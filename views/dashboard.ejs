@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Porta - File Manager</title>
+  <link rel="stylesheet" href="/stylesheets/dashboard.css" />
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Pacifico&display=swap');
+   </style>
+</head>
+<body>
+  <!-- Menu button (only visible on small screens) -->
+  <button class="menu-btn" id="menuBtn">☰</button>
+
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-top">
+      <h2 class="logo pacifico-regular">DoxHub</h2>
+
+      <div class="profile-section">
+        <img src="/images/teacher.gif" class="profile-picture">
+        <div class="profile-name"><%= email %></div>
+    </div>
+
+      <ul class="menu" id="categoryMenu">
+        <!-- Categories will be loaded dynamically -->
+    </ul>
+    </div>
+    <button class="Btn" id="logoutBtn">
+  
+      <div class="sign"><svg viewBox="0 0 512 512"><path d="M377.9 105.9L500.7 228.7c7.2 7.2 11.3 17.1 11.3 27.3s-4.1 20.1-11.3 27.3L377.9 406.1c-6.4 6.4-15 9.9-24 9.9c-18.7 0-33.9-15.2-33.9-33.9l0-62.1-128 0c-17.7 0-32-14.3-32-32l0-64c0-17.7 14.3-32 32-32l128 0 0-62.1c0-18.7 15.2-33.9 33.9-33.9c9 0 17.6 3.6 24 9.9zM160 96L96 96c-17.7 0-32 14.3-32 32l0 256c0 17.7 14.3 32 32 32l64 0c17.7 0 32 14.3 32 32s-14.3 32-32 32l-64 0c-53 0-96-43-96-96L0 128C0 75 43 32 96 32l64 0c17.7 0 32 14.3 32 32s-14.3 32-32 32z"></path></svg></div>
+      
+      <div class="text">Logout</div>
+  </button>
+  </div>
+
+  <div class="main-content">
+    <div class="header">
+      <input type="text" class="search" placeholder="Search..." />
+      <div class="sort-container">
+          <button class="sort" id="sortBtn">Sort: Last Modified ↓</button>
+          <div class="sort-dropdown" id="sortDropdown">
+              <div class="sort-option" data-sort="new">Newest First</div>
+              <div class="sort-option" data-sort="old">Oldest First</div>
+          </div>
+      </div>
+  </div>
+
+    <div class="file-grid">
+      
+  </div>
+
+  <script>
+
+    async function loadCategories() {
+        const response = await fetch('/user-categories');
+        const categories = await response.json();
+        
+        const categoryMenu = document.getElementById('categoryMenu');
+        categoryMenu.innerHTML = categories.map(category => 
+            `<li data-category="${category}">${category}</li>`
+        ).join('');
+    }
+
+    // Load categories when page loads
+    loadCategories();
+
+    // Toggle sidebar visibility on small screens
+    const menuBtn = document.getElementById("menuBtn");
+    const sidebar = document.getElementById("sidebar");
+
+    menuBtn.addEventListener("click", function() {
+      sidebar.classList.toggle("active");
+    });
+  </script>
+  <script src="/javascripts/dashboard.js"></script>
+</body>
+</html>
