@@ -130,15 +130,9 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--disable-gpu',
-            '--disable-features=site-per-process',
-            '--disable-web-security'
+            '--disable-gpu'
         ],
-        headless: true,
-        timeout: 60000,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false
+        headless: true
     }
 });
 
@@ -153,10 +147,9 @@ client.on('auth_failure', () => {
 
 
 // Generate QR Code
-client.on('qr', async qr => {
-    console.log('\n\n');
-    console.log('QR Code URL:', await qrcode.toDataURL(qr));
-    console.log('\n\n');
+client.on('qr', qr => {
+    qrcode.generate(qr, {small: true});
+    console.log('QR Code generated! Scan it with your WhatsApp');
 });
 
 // When client is ready
