@@ -155,6 +155,8 @@ client.on('qr', qr => {
 // When client is ready
 client.on('ready', () => {
     console.log('Client is ready!');
+    console.log('Listening for messages...');
+
 });
 
 // Help Text
@@ -183,6 +185,7 @@ Available Commands:
 
 // Handle incoming messages
 client.on('message', async msg => {
+    console.log('Listening for messages..');
     if (msg.from.includes('g.us')) return;
 
     // If it's just a number or text without # command, ignore
