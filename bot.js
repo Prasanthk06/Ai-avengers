@@ -137,7 +137,7 @@ const client = new Client({
 });
 
 client.on('authenticated', (session) => {
-    console.log('WhatsApp session authenticated');
+    console.log('WhatsApp session authenticated and preserved');
 });
 
 client.on('auth_failure', () => {
