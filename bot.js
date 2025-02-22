@@ -159,6 +159,10 @@ client.on('ready', () => {
 
 });
 
+setInterval(() => {
+    console.log('Bot heartbeat - still listening...');
+}, 60000);
+
 // Help Text
 const helpText = `
 Available Commands:
@@ -185,7 +189,16 @@ Available Commands:
 
 // Handle incoming messages
 client.on('message', async msg => {
-    console.log('Listening for messages..');
+
+    console.log('Raw message event:', msg.id);
+    console.log('Message type:', msg.type);
+    console.log('Full message details:', {
+        from: msg.from,
+        body: msg.body,
+        hasMedia: msg.hasMedia,
+        timestamp: new Date().toISOString()
+    });
+    
     if (msg.from.includes('g.us')) return;
 
     // If it's just a number or text without # command, ignore
