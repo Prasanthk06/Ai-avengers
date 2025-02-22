@@ -7,6 +7,15 @@ const axios = require('axios');
 const path = require('path');
 require('dotenv').config();
 
+// Add after your imports
+console.log('Environment Variables Check:');
+console.log('Bucket Name:', process.env.GOOGLE_CLOUD_BUCKET_NAME);
+console.log('Project ID:', process.env.GOOGLE_CLOUD_PROJECT_ID);
+console.log('Client Email:', process.env.GOOGLE_CLOUD_CLIENT_EMAIL);
+
+// Keep your existing code below
+
+
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
