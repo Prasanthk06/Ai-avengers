@@ -1,5 +1,5 @@
 const qrcode = require('qrcode-terminal');
-const { Client, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const { User, Media } = require('./database');
 const { Storage } = require('@google-cloud/storage');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -109,7 +109,33 @@ async function shortenUrl(url) {
 }
 
 // Create WhatsApp client
-const client = new Client();
+const client = new Client({
+    authStrategy: new LocalAuth({
+        dataPath: './whatsapp-sessions'
+    }),
+    puppeteer: {
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ],
+        headless: true
+    }
+});
+
+client.on('authenticated', (session) => {
+    console.log('WhatsApp session authenticated');
+});
+
+client.on('auth_failure', () => {
+    console.log('Auth failed, retrying connection...');
+    client.initialize();
+});
+
 
 // Generate QR Code
 client.on('qr', qr => {
