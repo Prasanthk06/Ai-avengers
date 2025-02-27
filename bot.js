@@ -1,20 +1,11 @@
 const qrcode = require('qrcode-terminal');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, MessageMedia, LocalAuth } = require('whatsapp-web.js');
 const { User, Media } = require('./database');
 const { Storage } = require('@google-cloud/storage');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
 const path = require('path');
 require('dotenv').config();
-
-// Add after your imports
-console.log('Environment Variables Check:');
-console.log('Bucket Name:', process.env.GOOGLE_CLOUD_BUCKET_NAME);
-console.log('Project ID:', process.env.GOOGLE_CLOUD_PROJECT_ID);
-console.log('Client Email:', process.env.GOOGLE_CLOUD_CLIENT_EMAIL);
-
-// Keep your existing code below
-
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -33,9 +24,9 @@ const bucket = storage.bucket(process.env.GOOGLE_CLOUD_BUCKET_NAME);
 // Gemini content analysis function
 async function analyzeContent(fileBuffer, mimeType, filename) {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    
+   
     const prompt = "Analyze this content and return a JSON object with these fields: category (one of: poster, exam, notes, assignment, event), keywords (array of strings), subject (string or null), date (string or null)";
-    
+   
     const imageParts = [
         {
             inlineData: {
@@ -66,7 +57,7 @@ async function analyzeContent(fileBuffer, mimeType, filename) {
 
 function parseDate(dateString) {
     if (!dateString) return null;
-    
+   
     try {
         // Handle different date formats
         if (dateString.includes('/')) {
@@ -75,7 +66,7 @@ function parseDate(dateString) {
             const date = new Date(`${fullYear}-${month}-${day}`);
             return date.getTime() ? date : null;
         }
-        
+       
         // Try parsing as a regular date string
         const date = new Date(dateString);
         return date.getTime() ? date : null;
@@ -83,7 +74,6 @@ function parseDate(dateString) {
         return null;
     }
 }
-
 
 // Helper function to upload file to Google Cloud Storage
 async function uploadToGCS(fileBuffer, fileName, mimeType) {
@@ -117,34 +107,12 @@ async function shortenUrl(url) {
     }
 }
 
-// Create WhatsApp client
+// Create WhatsApp client with session persistence
 const client = new Client({
     authStrategy: new LocalAuth({
-        dataPath: './whatsapp-sessions'
-    }),
-    puppeteer: {
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ],
-        headless: true
-    }
+        clientId: "client-one" // You can specify a unique ID for the session
+    })
 });
-
-client.on('authenticated', (session) => {
-    console.log('WhatsApp session authenticated and preserved');
-});
-
-client.on('auth_failure', () => {
-    console.log('Auth failed, retrying connection...');
-    client.initialize();
-});
-
 
 // Generate QR Code
 client.on('qr', qr => {
@@ -155,13 +123,17 @@ client.on('qr', qr => {
 // When client is ready
 client.on('ready', () => {
     console.log('Client is ready!');
-    console.log('Listening for messages...');
-
 });
 
-setInterval(() => {
-    console.log('Bot heartbeat - still listening...');
-}, 60000);
+// Log authentication success
+client.on('authenticated', () => {
+    console.log('Authenticated successfully');
+});
+
+// Log authentication failure
+client.on('auth_failure', msg => {
+    console.error('Authentication failure:', msg);
+});
 
 // Help Text
 const helpText = `
@@ -189,22 +161,8 @@ Available Commands:
 
 // Handle incoming messages
 client.on('message', async msg => {
-
-    console.log('Raw message event:', msg.id);
-    console.log('Message type:', msg.type);
-    console.log('Full message details:', {
-        from: msg.from,
-        body: msg.body,
-        hasMedia: msg.hasMedia,
-        timestamp: new Date().toISOString()
-    });
-    
-    if (msg.from.includes('g.us')) return;
-
-    // If it's just a number or text without # command, ignore
-    if (msg.body && !msg.body.startsWith('#') && !msg.hasMedia) return;
-
-    console.log('Message received:', {
+    const receivedTime = new Date();
+    console.log(`Message received at ${receivedTime.toISOString()}:`, {
         from: msg.from,
         body: msg.body,
         hasMedia: msg.hasMedia
@@ -215,7 +173,7 @@ client.on('message', async msg => {
         if (msg.body.startsWith('#verify')) {
             const code = msg.body.split(' ')[1];
             const user = await User.findOne({ uniqueCode: code });
-            
+           
             if (user) {
                 user.whatsappNumber = msg.from;
                 user.isVerified = true;
@@ -238,7 +196,7 @@ client.on('message', async msg => {
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();
             const fileBuffer = Buffer.from(media.data, 'base64');
-            
+           
             let analysis;
             if (media.mimetype.includes('image') || media.mimetype.includes('pdf')) {
                 msg.reply('Analyzing your content...');
@@ -251,7 +209,7 @@ client.on('message', async msg => {
                     date: null
                 };
             }
-            
+           
             const category = analysis.category.toLowerCase();
             const fileName = `${category}_${Date.now()}${path.extname(media.filename || '.file')}`;
             const mediaUrl = await uploadToGCS(fileBuffer, fileName, media.mimetype);
@@ -280,14 +238,14 @@ client.on('message', async msg => {
                 response += `\nSubject: ${analysis.subject}`;
             }
             response += `\nAccess it here: ${shortUrl}`;
-            
+           
             msg.reply(response);
             return;
         }
 
         if (msg.body.match(/(https?:\/\/[^\s]+)/g)) {
             const links = msg.body.match(/(https?:\/\/[^\s]+)/g);
-            
+           
             for (const link of links) {
                 await Media.create({
                     userId: user._id,
@@ -304,7 +262,7 @@ client.on('message', async msg => {
                     timestamp: new Date()
                 });
             }
-            
+           
             msg.reply(`${links.length} link(s) saved successfully!`);
             return;
         }
@@ -314,16 +272,16 @@ client.on('message', async msg => {
         if (msg.body === '#categories') {
             const files = await Media.find({ userId: user._id });
             const categories = {};
-            
+           
             files.forEach(file => {
                 categories[file.category] = (categories[file.category] || 0) + 1;
             });
-        
+       
             let response = '📊 Available Categories:\n\n';
             for (const [category, count] of Object.entries(categories)) {
                 response += `${category}: ${count} files\n`;
             }
-            
+           
             msg.reply(response);
             return;
         }
@@ -338,7 +296,7 @@ client.on('message', async msg => {
             const command = msg.body.split(' ');
             let startDate, endDate;
             const now = new Date();
-            
+           
             switch(command[1]) {
                 case 'today':
                     startDate = new Date(now.setHours(0,0,0,0));
@@ -380,7 +338,7 @@ client.on('message', async msg => {
             });
 
             let response = `Files from ${command[1]}:\n\n`;
-            
+           
             for (const category in groupedFiles) {
                 response += `${category.toUpperCase()}:\n`;
                 for (let i = 0; i < groupedFiles[category].length; i++) {
@@ -393,7 +351,7 @@ client.on('message', async msg => {
                 }
                 response += '\n';
             }
-            
+           
             msg.reply(response);
             return;
         }
@@ -403,24 +361,24 @@ client.on('message', async msg => {
             const command = msg.body.split(' ');
             const category = command[0].replace('#', '').slice(0, -1); // Remove 's' from end
             const limit = parseInt(command[1]) || 5;
-        
+       
             if (limit <= 0) {
                 msg.reply('Please specify a valid number greater than 0');
                 return;
             }
-        
+       
             const files = await Media.find({
                 userId: user._id,
                 category: category
             })
             .sort({ timestamp: -1 })
             .limit(limit);
-        
+       
             if (files.length === 0) {
                 msg.reply(`No ${category} files found`);
                 return;
             }
-        
+       
             let response = `Last ${limit} ${category} files:\n\n`;
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
@@ -430,7 +388,7 @@ client.on('message', async msg => {
                     response += `   Keywords: ${file.keywords.join(', ')}\n`;
                 }
             }
-            
+           
             msg.reply(response);
             return;
         }
@@ -467,7 +425,7 @@ client.on('message', async msg => {
                 }
                 response += '\n';
             }
-            
+           
             msg.reply(response);
             return;
         }

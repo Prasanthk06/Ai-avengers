@@ -19,14 +19,6 @@ app.use(express.static(path.join(__dirname,"public")));
 connectDB();
 
 // Add session handling
-client.on('authenticated', (session) => {
-    console.log('WhatsApp session authenticated');
-});
-
-client.on('auth_failure', () => {
-    console.log('Auth failed, retrying connection...');
-    client.initialize();
-});
 
 app.use(session({
     secret: process.env.SESSION_SECRET || 'abcdefghijklmnopq',
