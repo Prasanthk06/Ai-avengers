@@ -123,49 +123,83 @@ const requireAdmin = (req, res, next) => {
         });
 };
 
-// Modify the WhatsApp status route
+// Improve the WhatsApp status route with better error handling
 app.get('/whatsapp-status', requireAdmin, (req, res) => {
-    // Check if we have a cached status and it's recent (less than 10 seconds old)
-    if (global.cachedWhatsAppStatus && 
-        (Date.now() - global.cachedWhatsAppStatus.timestamp < 10000)) {
-        return res.json(global.cachedWhatsAppStatus);
-    }
+    // Set JSON content type upfront
+    res.setHeader('Content-Type', 'application/json');
     
-    // Get current time to ensure fresh status
-    const now = new Date();
-    
-    // Build status response object
-    const status = {
-        isAuthenticated: client.info ? true : false,
-        info: client.info || null,
-        lastQrTimestamp: global.lastQrTimestamp || null,
-        qrAvailable: global.lastQrTimestamp ? true : false,
-        timestamp: now.toISOString() // Add timestamp for debugging
-    };
-    
-    // Check if QR code file exists and get its stats
-    const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
     try {
-        if (fs.existsSync(qrPath)) {
-            const stats = fs.statSync(qrPath);
-            status.qrFileExists = true;
-            status.qrFileSize = stats.size;
-            status.qrFileTime = stats.mtime.toISOString();
-        } else {
-            status.qrFileExists = false;
+        // Check if we have a cached status and it's recent (less than 10 seconds old)
+        if (global.cachedWhatsAppStatus && 
+            (Date.now() - global.cachedWhatsAppStatus.timestamp < 10000)) {
+            return res.json(global.cachedWhatsAppStatus);
         }
+        
+        // Get current time to ensure fresh status
+        const now = new Date();
+        let clientInfo = null;
+        let isAuthenticated = false;
+        
+        // Safely check client info
+        try {
+            if (client && client.info) {
+                isAuthenticated = true;
+                clientInfo = {
+                    pushname: client.info.pushname || '',
+                    platform: client.info.platform || '',
+                    wid: client.info.wid ? client.info.wid._serialized : ''
+                };
+            }
+        } catch (clientError) {
+            console.error('Error accessing client info:', clientError.message);
+        }
+        
+        // Build status response object
+        const status = {
+            isAuthenticated: isAuthenticated,
+            info: clientInfo,
+            lastQrTimestamp: global.lastQrTimestamp || null,
+            qrAvailable: global.lastQrTimestamp ? true : false,
+            timestamp: now.toISOString(), // Add timestamp for debugging
+            serverTime: Date.now()
+        };
+        
+        // Check if QR code file exists and get its stats
+        let qrStatus = { qrFileExists: false };
+        try {
+            const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+            if (fs.existsSync(qrPath)) {
+                const stats = fs.statSync(qrPath);
+                qrStatus.qrFileExists = true;
+                qrStatus.qrFileSize = stats.size;
+                qrStatus.qrFileTime = stats.mtime.toISOString();
+            }
+        } catch (error) {
+            qrStatus.qrFileError = error.message;
+        }
+        
+        // Merge QR status with main status
+        const fullStatus = { ...status, ...qrStatus };
+        
+        // Cache the status
+        global.cachedWhatsAppStatus = {
+            ...fullStatus,
+            timestamp: Date.now() // Add cache timestamp
+        };
+        
+        // Return the status as JSON
+        return res.json(fullStatus);
+        
     } catch (error) {
-        status.qrFileExists = false;
-        status.qrFileError = error.message;
+        // If any error occurs, still return a valid JSON response
+        console.error('Error generating status response:', error);
+        return res.json({
+            error: true,
+            message: 'Error generating status: ' + error.message,
+            timestamp: new Date().toISOString(),
+            serverTime: Date.now()
+        });
     }
-    
-    // Cache the status
-    global.cachedWhatsAppStatus = {
-        ...status,
-        timestamp: Date.now() // Add cache timestamp
-    };
-    
-    res.json(status);
 });
 
 // WhatsApp QR code admin page
@@ -219,66 +253,89 @@ app.post('/admin/whatsapp/restart', requireAdmin, (req, res) => {
     });
 });
 
-// Replace the /admin/whatsapp/regenerate-qr route with this more robust version
+// Replace the QR regeneration route with this crash-proof version
 app.post('/admin/whatsapp/regenerate-qr', requireAdmin, (req, res) => {
     console.log('Admin requested QR code regeneration');
     
     // Send response immediately to prevent timeout
     res.json({
         success: true,
-        message: 'QR regeneration requested. Please wait 1 minute and then refresh the page.'
+        message: 'QR regeneration requested. The server will restart WhatsApp services. Please wait 60 seconds and then refresh the page.'
     });
     
-    // Execute in separate context to avoid request handling issues
+    // Execute in separate context with error boundaries
     setTimeout(async () => {
+        // Wrap everything in try/catch to prevent process crashes
         try {
             console.log('Starting QR regeneration process...');
             
-            // Reset QR generation throttling if exists
+            // Reset global state
             if (global.lastQrGeneration) global.lastQrGeneration = 0;
             if (global.qrRegenerationCount) global.qrRegenerationCount = 0;
-            
-            // Clear the QR timestamp so we know we need a new one
             global.lastQrTimestamp = null;
             
-            let browserClosedManually = false;
+            // Track what we've attempted for better error recovery
+            let browserClosed = false;
+            let clientDestroyed = false;
             
-            // Check if puppeteer browser exists and try to close it safely
-            if (client.pupBrowser) {
-                try {
-                    console.log('Attempting to close Puppeteer browser...');
-                    const pages = await client.pupBrowser.pages().catch(() => []);
-                    for (const page of pages) {
-                        try {
-                            await page.close().catch(() => {});
-                        } catch (e) {
-                            console.log('Error closing page:', e.message);
+            // Safely destroy the WhatsApp client
+            try {
+                console.log('Attempting to safely destroy WhatsApp client...');
+                
+                // Safely handle browser closing
+                if (client.pupBrowser) {
+                    try {
+                        console.log('Closing Puppeteer browser...');
+                        const pages = await client.pupBrowser.pages().catch(() => []);
+                        
+                        // Close any open pages
+                        for (const page of pages) {
+                            try {
+                                await page.close().catch(() => {});
+                            } catch (e) {
+                                console.log('Page close error (non-fatal):', e.message);
+                            }
                         }
+                        
+                        // Attempt to close browser
+                        try {
+                            await client.pupBrowser.close().catch(() => {});
+                            browserClosed = true;
+                            console.log('Browser closed successfully');
+                        } catch (e) {
+                            console.log('Browser close error (non-fatal):', e.message);
+                        }
+                    } catch (error) {
+                        console.log('Error accessing browser (non-fatal):', error.message);
                     }
-                    await client.pupBrowser.close().catch(() => {});
-                    browserClosedManually = true;
-                    console.log('Browser closed manually');
-                } catch (error) {
-                    console.log('Error closing browser:', error.message);
                 }
+                
+                // Wait a moment before destroy (racing condition protection)
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Try to destroy client if browser close failed or wasn't attempted
+                if (!browserClosed) {
+                    try {
+                        await client.destroy().catch(e => {
+                            console.log('Client destroy error (non-fatal):', e.message);
+                        });
+                        clientDestroyed = true;
+                        console.log('Client destroyed successfully');
+                    } catch (error) {
+                        console.log('Failed to destroy client (non-fatal):', error.message);
+                    }
+                } else {
+                    clientDestroyed = true; // If browser closed, consider client destroyed
+                }
+            } catch (outerError) {
+                console.error('Error during client cleanup (non-fatal):', outerError.message);
             }
             
-            // If we couldn't close the browser properly, try to destroy the client
-            if (!browserClosedManually && client.pupBrowser) {
-                try {
-                    console.log('Attempting to destroy WhatsApp client...');
-                    await client.destroy().catch(e => console.log('Destroy error:', e.message));
-                    console.log('Client destroyed');
-                } catch (error) {
-                    console.log('Failed to destroy client:', error.message);
-                }
-            }
-            
-            // Wait a significant amount of time to ensure resources are freed
-            console.log('Waiting 15 seconds before reinitializing...');
+            // Wait to ensure everything is properly cleaned up
+            console.log('Waiting for 15 seconds before reinitializing...');
             await new Promise(resolve => setTimeout(resolve, 15000));
             
-            // Delete the QR file if it exists to ensure we generate a new one
+            // Delete the QR file if it exists
             try {
                 const qrPath = path.join(__dirname, 'public', 'latest-qr.png');
                 if (fs.existsSync(qrPath)) {
@@ -286,68 +343,47 @@ app.post('/admin/whatsapp/regenerate-qr', requireAdmin, (req, res) => {
                     console.log('Deleted existing QR code file');
                 }
             } catch (err) {
-                console.log('Error deleting QR file:', err.message);
+                console.log('Error deleting QR file (non-fatal):', err.message);
             }
             
             // Force garbage collection if available
             if (global.gc) {
                 try {
                     global.gc();
-                    console.log('Forced garbage collection');
+                    console.log('Garbage collection completed');
                 } catch (e) {
-                    console.log('GC error:', e.message);
+                    console.log('GC error (non-fatal):', e.message);
                 }
             }
             
-            // Initialize the client with a large timeout
-            console.log('Reinitializing WhatsApp client...');
-            try {
-                await client.initialize();
-                console.log('Client reinitialized successfully');
-            } catch (initError) {
-                console.error('Failed to initialize client:', initError.message);
-                
-                // If initialization fails, we need to handle it gracefully
-                console.log('Attempting recovery from failed initialization...');
-                
-                // Wait before trying again
-                await new Promise(resolve => setTimeout(resolve, 10000));
+            // If we couldn't properly destroy things, we'll need to restart the server
+            // But first, let's try to initialize as a last resort
+            if (browserClosed || clientDestroyed) {
+                console.log('Client cleanup successful, attempting to initialize...');
                 
                 try {
-                    // Create a new client instance as a last resort
-                    console.log('Creating a new client instance...');
-                    const { Client, LocalAuth } = require('whatsapp-web.js');
-                    
-                    // Use the existing client configuration but with even more conservative settings
-                    client = new Client({
-                        authStrategy: new LocalAuth({
-                            clientId: "main-whatsapp-client",
-                            dataPath: path.join(process.cwd(), '.wwebjs_auth')
-                        }),
-                        puppeteer: {
-                            headless: 'new',
-                            args: [
-                                '--no-sandbox',
-                                '--disable-setuid-sandbox',
-                                '--disable-gpu',
-                                '--disable-dev-shm-usage'
-                            ],
-                            defaultViewport: null,
-                            timeout: 180000 // 3 minutes
-                        }
-                    });
-                    
-                    // Initialize the new client
-                    await client.initialize();
-                    console.log('New client instance initialized');
-                } catch (recoveryError) {
-                    console.error('Recovery failed:', recoveryError.message);
+                    // Ensure null references to prevent errors
+                    if (!client.pupBrowser && !client.pupPage) {
+                        await client.initialize().catch(e => {
+                            console.error('Client initialization error (attempting recovery):', e.message);
+                            throw e; // Rethrow for outer catch
+                        });
+                        console.log('Client initialized successfully');
+                    } else {
+                        console.error('Client has browser/page references but should be destroyed, cannot initialize safely');
+                        throw new Error('Client not properly destroyed');
+                    }
+                } catch (initError) {
+                    // If initialization fails, suggest server restart
+                    console.error('Failed to initialize WhatsApp client, server restart may be required:', initError.message);
                 }
+            } else {
+                console.error('Failed to properly clean up WhatsApp client, server restart recommended');
             }
         } catch (outerError) {
-            console.error('Outer error in QR regeneration:', outerError);
+            console.error('Outer error in QR regeneration (non-fatal):', outerError.message);
         }
-    }, 1000); // Start the process after 1 second
+    }, 1000);
 });
 
 // WhatsApp connection troubleshooting route
@@ -661,4 +697,95 @@ process.on('SIGTERM', () => {
     setTimeout(() => {
         process.exit(0);
     }, 5000);
+});
+
+// Global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+    console.error('UNCAUGHT EXCEPTION - keeping process alive:', error);
+    
+    // If it's a Puppeteer Protocol error, it's likely from WhatsApp Web
+    if (error.message && error.message.includes('Protocol error')) {
+        console.log('WhatsApp/Puppeteer protocol error detected - will recover automatically');
+        
+        // Try to reset WhatsApp client if possible in next tick
+        process.nextTick(() => {
+            try {
+                if (client && client.pupBrowser) {
+                    console.log('Attempting emergency browser reset...');
+                    client.pupBrowser.close().catch(() => {});
+                }
+            } catch (e) {
+                console.log('Failed emergency reset:', e.message);
+            }
+        });
+    }
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Promise Rejection at:', promise, 'reason:', reason);
+    // No need to crash the server for promise rejections
+});
+
+// Add this middleware after app is defined but before any routes
+// Add JSON error handling middleware
+app.use((req, res, next) => {
+    // Only apply to API and status routes
+    const isApiRoute = req.path.startsWith('/api/') || 
+                      req.path.includes('status') ||
+                      req.path.includes('whatsapp');
+    
+    // Save original res.status to use later
+    const originalStatus = res.status;
+    
+    // Override res.status for API routes
+    if (isApiRoute) {
+        // Replace res.status to ensure it returns valid JSON
+        res.status = function(code) {
+            // Call the original method
+            originalStatus.call(this, code);
+            
+            // For error codes, ensure we return JSON
+            if (code >= 400) {
+                res.setHeader('Content-Type', 'application/json');
+                
+                // Attach a send method to ensure JSON response
+                const originalSend = this.send;
+                this.send = function(data) {
+                    let jsonResponse;
+                    
+                    try {
+                        // Check if data is already JSON
+                        if (typeof data === 'object') {
+                            jsonResponse = data;
+                        } else {
+                            // Convert to JSON error response
+                            jsonResponse = { 
+                                error: true, 
+                                status: code,
+                                message: data || 'An error occurred',
+                                timestamp: new Date().toISOString()
+                            };
+                        }
+                        
+                        // Send as JSON
+                        return originalSend.call(this, jsonResponse);
+                        
+                    } catch (err) {
+                        // If anything fails, ensure we still send valid JSON
+                        return originalSend.call(this, { 
+                            error: true, 
+                            status: 500,
+                            message: 'Internal Server Error',
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                };
+            }
+            
+            return this;
+        };
+    }
+    
+    next();
 });

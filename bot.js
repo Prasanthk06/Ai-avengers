@@ -1060,6 +1060,11 @@ function patchClientMethods() {
             return true;
         } catch (error) {
             console.error('Error in safe destroy:', error);
+            
+            // Even if there's an error, reset references
+            this.pupBrowser = null;
+            this.pupPage = null;
+            
             return false;
         }
     };
@@ -1083,8 +1088,32 @@ function patchClientMethods() {
             // Wait a moment before initializing
             await new Promise(resolve => setTimeout(resolve, 3000));
             
-            // Call original initialize
-            return await originalInitialize.call(this);
+            // Add another error boundary specifically for initialization
+            try {
+                // Call original initialize
+                return await originalInitialize.call(this);
+            } catch (initError) {
+                console.error('Error in initialization, attempting direct browser restart:', initError.message);
+                
+                // If this fails, try a more direct browser creation
+                if (initError.message.includes('Protocol error') || 
+                    initError.message.includes('Target closed')) {
+                    console.log('Protocol error detected, trying alternative initialization...');
+                    
+                    // Wait longer before retrying
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    
+                    // Try to initialize with a completely clean state
+                    this.pupBrowser = null;
+                    this.pupPage = null;
+                    
+                    // One last attempt
+                    return await originalInitialize.call(this);
+                }
+                
+                // Re-throw if not a protocol error
+                throw initError;
+            }
         } catch (error) {
             console.error('Error in safe initialize:', error);
             throw error;
