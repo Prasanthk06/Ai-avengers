@@ -153,41 +153,34 @@ const STABLE_CLIENT_ID = "main-whatsapp-client";
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: STABLE_CLIENT_ID,
-        dataPath: AUTH_FOLDER_PATH,
-        backupSyncIntervalMs: 300000, // Sync every 5 minutes instead of default
+        dataPath: AUTH_FOLDER_PATH
     }),
     puppeteer: {
         headless: 'new',
+        handleSIGINT: false, // Important to avoid browser hanging on interrupts
+        handleSIGTERM: false, // Important to avoid browser hanging on termination
+        handleSIGHUP: false, // Important to avoid browser hanging on hangups
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-gpu',
             '--disable-dev-shm-usage',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-extensions',
-            '--disable-browser-side-navigation',
-            '--disable-accelerated-2d-canvas',
+            '--disable-web-security',
             '--disable-features=site-per-process,TranslateUI',
+            '--disable-extensions',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-component-extensions-with-background-pages',
             '--disable-ipc-flooding-protection',
-            '--disable-renderer-backgrounding',
-            '--disable-infobars'
+            '--no-default-browser-check',
+            '--no-first-run'
         ],
         ignoreHTTPSErrors: true,
         defaultViewport: null,
-        timeout: 120000, // Increase timeout to 2 minutes
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
+        timeout: 120000, // 2 minutes
     },
+    authTimeoutMs: 120000, // Add longer timeout for authentication
     queueMessages: true,
-    takeoverOnConflict: false, // Change to false to prevent takeover conflicts
-    takeoverTimeoutMs: 30000,
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://web.whatsapp.com', // Use official URL
-    },
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    disableReconnect: false,
-    bypassCSP: true,
     restartOnCrash: true
 });
 
@@ -808,14 +801,88 @@ async function safePageOperation(operation, fallbackValue = null) {
 function patchClientMethods() {
     // Store original methods
     const originalGetState = client.getState;
+    const originalDestroy = client.destroy;
+    const originalInitialize = client.initialize;
     
-    // Replace with safe versions
+    // Replace getState with safe version
     client.getState = async function() {
         return safePageOperation(async () => {
             return await originalGetState.call(client);
         }, 'DISCONNECTED');
     };
-
+    
+    // Replace destroy with safe version
+    client.destroy = async function() {
+        console.log('Safe destroy called');
+        try {
+            // First try to close pages if browser is available
+            if (this.pupBrowser) {
+                try {
+                    const pages = await this.pupBrowser.pages().catch(() => []);
+                    for (const page of pages) {
+                        try {
+                            await page.close().catch(() => {});
+                        } catch (e) {
+                            // Ignore page close errors
+                        }
+                    }
+                } catch (e) {
+                    // Ignore browser errors
+                }
+                
+                // Try to close browser
+                try {
+                    await this.pupBrowser.close().catch(() => {});
+                } catch (e) {
+                    // Ignore browser close errors
+                }
+            }
+            
+            // Call original destroy
+            try {
+                await originalDestroy.call(this).catch(() => {});
+            } catch (e) {
+                // Ignore destroy errors
+            }
+            
+            // Reset browser references
+            this.pupBrowser = null;
+            this.pupPage = null;
+            
+            return true;
+        } catch (error) {
+            console.error('Error in safe destroy:', error);
+            return false;
+        }
+    };
+    
+    // Replace initialize with safe version
+    client.initialize = async function() {
+        console.log('Safe initialize called');
+        try {
+            // Ensure we're fully destroyed before initializing
+            await this.destroy().catch(() => {});
+            
+            // Force garbage collection if available
+            if (global.gc) {
+                try {
+                    global.gc();
+                } catch (e) {
+                    // Ignore GC errors
+                }
+            }
+            
+            // Wait a moment before initializing
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Call original initialize
+            return await originalInitialize.call(this);
+        } catch (error) {
+            console.error('Error in safe initialize:', error);
+            throw error;
+        }
+    };
+    
     console.log('[Patch] Client methods patched for safe operation');
 }
 

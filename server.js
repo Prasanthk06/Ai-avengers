@@ -179,43 +179,135 @@ app.post('/admin/whatsapp/restart', requireAdmin, (req, res) => {
     });
 });
 
-// Modify the /admin/whatsapp/regenerate-qr route (if it exists)
+// Replace the /admin/whatsapp/regenerate-qr route with this more robust version
 app.post('/admin/whatsapp/regenerate-qr', requireAdmin, (req, res) => {
     console.log('Admin requested QR code regeneration');
     
-    // Send response immediately
+    // Send response immediately to prevent timeout
     res.json({
         success: true,
-        message: 'QR regeneration initiated. This may take a minute to complete.'
+        message: 'QR regeneration requested. Please wait 1 minute and then refresh the page.'
     });
     
-    // Run the operation asynchronously
-    safeClientOperation(res, async () => {
+    // Execute in separate context to avoid request handling issues
+    setTimeout(async () => {
         try {
+            console.log('Starting QR regeneration process...');
+            
+            // Reset QR generation throttling if exists
+            if (global.lastQrGeneration) global.lastQrGeneration = 0;
+            if (global.qrRegenerationCount) global.qrRegenerationCount = 0;
+            
+            // Clear the QR timestamp so we know we need a new one
+            global.lastQrTimestamp = null;
+            
+            let browserClosedManually = false;
+            
+            // Check if puppeteer browser exists and try to close it safely
             if (client.pupBrowser) {
-                await client.destroy();
-                console.log('Client destroyed, waiting before regenerating QR...');
-                
-                await new Promise(r => setTimeout(r, 5000));
-                
-                // Reset any QR throttling
-                if (typeof client.lastQrGeneration !== 'undefined') {
-                    client.lastQrGeneration = 0;
+                try {
+                    console.log('Attempting to close Puppeteer browser...');
+                    const pages = await client.pupBrowser.pages().catch(() => []);
+                    for (const page of pages) {
+                        try {
+                            await page.close().catch(() => {});
+                        } catch (e) {
+                            console.log('Error closing page:', e.message);
+                        }
+                    }
+                    await client.pupBrowser.close().catch(() => {});
+                    browserClosedManually = true;
+                    console.log('Browser closed manually');
+                } catch (error) {
+                    console.log('Error closing browser:', error.message);
                 }
-                if (typeof client.qrRegenerationCount !== 'undefined') {
-                    client.qrRegenerationCount = 0; 
-                }
-                
-                await client.initialize();
-                console.log('Client reinitialized, QR should be generated');
-            } else {
-                console.log('Client not initialized, starting initialization');
-                await client.initialize();
             }
-        } catch (error) {
-            console.error('Error during QR regeneration:', error);
+            
+            // If we couldn't close the browser properly, try to destroy the client
+            if (!browserClosedManually && client.pupBrowser) {
+                try {
+                    console.log('Attempting to destroy WhatsApp client...');
+                    await client.destroy().catch(e => console.log('Destroy error:', e.message));
+                    console.log('Client destroyed');
+                } catch (error) {
+                    console.log('Failed to destroy client:', error.message);
+                }
+            }
+            
+            // Wait a significant amount of time to ensure resources are freed
+            console.log('Waiting 15 seconds before reinitializing...');
+            await new Promise(resolve => setTimeout(resolve, 15000));
+            
+            // Delete the QR file if it exists to ensure we generate a new one
+            try {
+                const qrPath = path.join(__dirname, 'public', 'latest-qr.png');
+                if (fs.existsSync(qrPath)) {
+                    fs.unlinkSync(qrPath);
+                    console.log('Deleted existing QR code file');
+                }
+            } catch (err) {
+                console.log('Error deleting QR file:', err.message);
+            }
+            
+            // Force garbage collection if available
+            if (global.gc) {
+                try {
+                    global.gc();
+                    console.log('Forced garbage collection');
+                } catch (e) {
+                    console.log('GC error:', e.message);
+                }
+            }
+            
+            // Initialize the client with a large timeout
+            console.log('Reinitializing WhatsApp client...');
+            try {
+                await client.initialize();
+                console.log('Client reinitialized successfully');
+            } catch (initError) {
+                console.error('Failed to initialize client:', initError.message);
+                
+                // If initialization fails, we need to handle it gracefully
+                console.log('Attempting recovery from failed initialization...');
+                
+                // Wait before trying again
+                await new Promise(resolve => setTimeout(resolve, 10000));
+                
+                try {
+                    // Create a new client instance as a last resort
+                    console.log('Creating a new client instance...');
+                    const { Client, LocalAuth } = require('whatsapp-web.js');
+                    
+                    // Use the existing client configuration but with even more conservative settings
+                    client = new Client({
+                        authStrategy: new LocalAuth({
+                            clientId: "main-whatsapp-client",
+                            dataPath: path.join(process.cwd(), '.wwebjs_auth')
+                        }),
+                        puppeteer: {
+                            headless: 'new',
+                            args: [
+                                '--no-sandbox',
+                                '--disable-setuid-sandbox',
+                                '--disable-gpu',
+                                '--disable-dev-shm-usage'
+                            ],
+                            defaultViewport: null,
+                            timeout: 180000 // 3 minutes
+                        }
+                    });
+                    
+                    // Initialize the new client
+                    await client.initialize();
+                    console.log('New client instance initialized');
+                } catch (recoveryError) {
+                    console.error('Recovery failed:', recoveryError.message);
+                }
+            }
+        } catch (outerError) {
+            console.error('Outer error in QR regeneration:', outerError);
         }
-    });
+    }, 1000); // Start the process after 1 second
 });
 
 // WhatsApp connection troubleshooting route

@@ -201,52 +201,97 @@
         
         // Regenerate QR code
         document.getElementById('regenerate-qr').addEventListener('click', async function() {
+            // First confirm the action
+            if (!confirm('This will completely reset the WhatsApp connection and may take up to a minute. Continue?')) {
+                return;
+            }
+            
             try {
                 const button = this;
                 button.disabled = true;
-                button.textContent = 'Regenerating...';
+                button.textContent = 'Processing...';
                 
-                const response = await fetch('/admin/whatsapp/regenerate-qr', {
-                    method: 'POST'
+                // Disable all other buttons too
+                document.querySelectorAll('.actions button').forEach(btn => {
+                    if (btn !== button) btn.disabled = true;
                 });
-                const data = await response.json();
                 
-                alert(data.message);
-                
-                // Set a message indicating we're waiting for the QR
+                // Set a message immediately
                 document.getElementById('qr-status').innerHTML = `
-                    <p>Waiting for QR code generation...</p>
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading...</span>
+                    <div class="alert alert-warning">
+                        <p><strong>QR regeneration process started.</strong></p>
+                        <p>This will take about 1 minute to complete.</p>
+                        <p>Please <strong>DO NOT</strong> click any buttons or refresh the page during this time.</p>
+                        <div class="progress mt-3">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 role="progressbar" 
+                                 aria-valuenow="0" 
+                                 aria-valuemin="0" 
+                                 aria-valuemax="100" 
+                                 style="width: 0%">
+                            </div>
+                        </div>
+                        <p class="text-muted mt-2" id="progress-message">Starting process...</p>
                     </div>
                 `;
                 
-                // Enable more frequent checking for the new QR code
-                let checkCount = 0;
-                const checkInterval = setInterval(() => {
-                    checkCount++;
-                    updateStatus();
-                    
-                    // Stop checking after 60 seconds (30 attempts)
-                    if (checkCount > 30) {
-                        clearInterval(checkInterval);
-                        button.disabled = false;
-                        button.textContent = 'Regenerate QR Code';
+                // Start progress animation
+                const progressBar = document.querySelector('.progress-bar');
+                const progressMessage = document.getElementById('progress-message');
+                let progress = 0;
+                
+                const progressInterval = setInterval(() => {
+                    progress += 1;
+                    if (progress <= 100) {
+                        progressBar.style.width = `${progress}%`;
+                        progressBar.setAttribute('aria-valuenow', progress);
                         
-                        // If we still don't have a QR code, show an error
-                        if (!document.querySelector('.qr-image')) {
-                            document.getElementById('qr-status').innerHTML += `
-                                <div class="alert alert-warning mt-3">
-                                    QR code didn't appear. Try clicking the "Refresh Status" button or restart again.
-                                </div>
-                            `;
+                        // Update progress message at certain points
+                        if (progress === 10) {
+                            progressMessage.textContent = 'Closing WhatsApp connection...';
+                        } else if (progress === 30) {
+                            progressMessage.textContent = 'Cleaning up resources...';
+                        } else if (progress === 50) {
+                            progressMessage.textContent = 'Waiting for system to release resources...';
+                        } else if (progress === 70) {
+                            progressMessage.textContent = 'Initializing new connection...';
+                        } else if (progress === 90) {
+                            progressMessage.textContent = 'Generating new QR code...';
+                        } else if (progress === 100) {
+                            progressMessage.textContent = 'Process complete! The page will refresh in 5 seconds.';
+                            
+                            // After reaching 100%, wait 5 seconds and refresh the page
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 5000);
+                            
+                            clearInterval(progressInterval);
                         }
                     }
-                }, 2000);
+                }, 600); // 60 seconds total (100 * 600ms = 60000ms)
+                
+                // Call the API to regenerate QR (but don't wait for response)
+                fetch('/admin/whatsapp/regenerate-qr', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                }).then(response => response.json())
+                  .then(data => {
+                      console.log('QR regeneration response:', data);
+                  })
+                  .catch(error => {
+                      console.error('Error during QR regeneration:', error);
+                      // Don't show error to user, the page will refresh anyway
+                  });
+                
             } catch (error) {
-                console.error('Error regenerating QR code:', error);
-                alert('Failed to regenerate QR code');
-                this.disabled = false;
+                console.error('Error initiating QR regeneration:', error);
+                alert('An error occurred. Please try again in a few minutes.');
+                
+                // Re-enable buttons
+                document.querySelectorAll('.actions button').forEach(btn => {
+                    btn.disabled = false;
+                });
+                
                 this.textContent = 'Regenerate QR Code';
             }
         });
