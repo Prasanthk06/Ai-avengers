@@ -146,13 +146,18 @@ function parseDate(dateString) {
 // Call function to ensure directories exist before initializing client
 ensureDirectoriesExist();
 
+// Add a more stable client ID that doesn't change between sessions
+const STABLE_CLIENT_ID = "main-whatsapp-client";
+
+// Modify the client configuration
 const client = new Client({
     authStrategy: new LocalAuth({
-        clientId: "client-one",
-        dataPath: AUTH_FOLDER_PATH
+        clientId: STABLE_CLIENT_ID,
+        dataPath: AUTH_FOLDER_PATH,
+        backupSyncIntervalMs: 300000, // Sync every 5 minutes instead of default
     }),
     puppeteer: {
-        headless: 'new', // Always use headless in Railway
+        headless: 'new',
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -160,7 +165,7 @@ const client = new Client({
             '--disable-dev-shm-usage',
             '--disable-web-security',
             '--aggressive-cache-discard',
-            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-features=IsolateOrigins',
             '--disable-site-isolation-trials',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
@@ -171,27 +176,26 @@ const client = new Client({
             '--disable-backgrounding-occluded-windows',
             '--disable-breakpad',
             '--disable-component-extensions-with-background-pages',
-            '--disable-dev-shm-usage',
-            '--disable-domain-reliability',
             '--disable-hang-monitor',
-            '--disable-ipc-flooding-protection',
-            '--disable-renderer-backgrounding',
-            '--disable-sync',
-            '--disable-translate',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--no-default-browser-check'
+            '--disable-ipc-flooding-protection'
         ],
         defaultViewport: null,
-        timeout: 0,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null // Support for custom Chromium
+        timeout: 60000, // Increase timeout to 60 seconds
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
     },
     queueMessages: true,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 15000, // Increased timeout further
-    restartOnAuthFail: true,
-    disableReconnect: false, // Ensure reconnection is enabled
-    bypassCSP: true, // May help with connection issues
+    takeoverOnConflict: false, // Change to false to prevent takeover conflicts
+    takeoverTimeoutMs: 30000,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    ffmpegPath: null, // Ensure this is null to prevent audio/video processing issues
+    webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://web.whatsapp.com', // Use official URL
+    },
+    disableReconnect: false,
+    bypassCSP: true,
+    webVersion: '2.2346.52', // Set a specific web version to avoid compatibility issues
+    restartOnCrash: true,
 });
 
 // Keep-alive strategy
@@ -205,11 +209,16 @@ function startConnectionMonitor() {
     
     connectionMonitor = setInterval(async () => {
         try {
-            // If client is initialized but we haven't been able to get state in 5 minutes
+            // If client is initialized but we haven't been able to get state in 10 minutes
             const now = Date.now();
             const timeSinceLastCheck = now - lastConnectionCheck;
             
             console.log(`Connection monitor check: Last status check ${Math.round(timeSinceLastCheck/1000/60)} minutes ago`);
+            
+            // Only perform checks if it's been a significant time since the last check
+            if (timeSinceLastCheck < 5 * 60 * 1000) {
+                return; // Skip if less than 5 minutes since last check
+            }
             
             // Check if client is connected by trying to get state
             if (client.pupPage && !client.pupPage.isClosed()) {
@@ -219,26 +228,26 @@ function startConnectionMonitor() {
                     lastConnectionCheck = now;
                     console.log(`WhatsApp connection state: ${state}`);
                     
-                    // If we're not connected, try to reconnect
-                    if (state !== 'CONNECTED') {
-                        console.log('WhatsApp not in CONNECTED state, attempting reconnect...');
+                    // Only attempt reconnect if completely disconnected
+                    if (state === 'DISCONNECTED') {
+                        console.log('WhatsApp disconnected, attempting reconnect...');
                         attemptReconnect();
                     }
                 } catch (err) {
                     console.log('Error getting connection state:', err.message);
-                    if (timeSinceLastCheck > 5 * 60 * 1000) { // 5 minutes
+                    if (timeSinceLastCheck > 15 * 60 * 1000) { // 15 minutes
                         console.log('Connection appears to be stuck, attempting reconnect...');
                         attemptReconnect();
                     }
                 }
-            } else {
-                console.log('Client page is closed or unavailable, attempting reconnect...');
+            } else if (timeSinceLastCheck > 20 * 60 * 1000) { // 20 minutes with no page
+                console.log('Client page is closed or unavailable for extended period, attempting reconnect...');
                 attemptReconnect();
             }
         } catch (err) {
             console.error('Connection monitor error:', err.message);
         }
-    }, 2 * 60 * 1000); // Check every 2 minutes
+    }, 5 * 60 * 1000); // Check every 5 minutes instead of 2
 }
 
 // Add a special function to ensure client is up after Railway deployment
@@ -275,15 +284,23 @@ async function attemptReconnect() {
         await client.destroy();
         console.log('Client destroyed, initializing new instance...');
         
-        // Short delay before reinitialization
-        await new Promise(r => setTimeout(r, 3000));
+        // Longer delay before reinitialization (10 seconds)
+        await new Promise(r => setTimeout(r, 10000));
+        
+        // Reset QR throttling counters
+        qrRegenerationCount = 0;
+        lastQrGeneration = 0;
         
         await client.initialize();
         console.log('Client reinitialized successfully');
     } catch (error) {
         console.log('Reconnection attempt failed:', error.message);
     } finally {
-        isReconnecting = false;
+        // Longer cooldown between reconnection attempts (2 minutes)
+        setTimeout(() => {
+            isReconnecting = false;
+            console.log('Reconnection cooldown completed');
+        }, 2 * 60 * 1000);
     }
 }
 
@@ -343,19 +360,45 @@ Available Commands:
 - Use #help anytime to see this menu
 `;
 // Event Handlers
+let lastQrGeneration = 0;
+const QR_THROTTLE_MS = 30000; // Minimum 30 seconds between QR generations
+let qrRegenerationCount = 0;
+const MAX_QR_REGENERATIONS = 5; // Maximum consecutive QR regenerations
+
 client.on('qr', async (qr) => {
-    // Clear any existing QR retry timeout
-    if (qrRetryTimeout) {
-        clearTimeout(qrRetryTimeout);
+    // Check if we've generated QR codes too frequently
+    const now = Date.now();
+    const timeSinceLastQr = now - lastQrGeneration;
+    
+    // If we regenerated QR too quickly or too many times, throttle it
+    if (timeSinceLastQr < QR_THROTTLE_MS) {
+        qrRegenerationCount++;
+        console.log(`QR regeneration too frequent (${Math.round(timeSinceLastQr/1000)}s), throttling. Count: ${qrRegenerationCount}/${MAX_QR_REGENERATIONS}`);
+        
+        if (qrRegenerationCount > MAX_QR_REGENERATIONS) {
+            console.log('Too many QR regenerations, pausing client...');
+            // Add a longer delay before allowing another QR
+            setTimeout(() => {
+                qrRegenerationCount = 0; // Reset counter after cooling down
+                console.log('QR throttling reset after cooling period');
+            }, 2 * 60 * 1000); // 2 minute cooling period
+            return;
+        }
+        
+        return; // Skip generating a new QR code
     }
     
-    // Generate terminal QR for development
-    qrcode.generate(qr, {small: true});
-    console.log('QR Code generated! Scan it with your WhatsApp');
+    // We passed the throttle check, update the timestamp and reset counter if needed
+    lastQrGeneration = now;
+    if (timeSinceLastQr > 2 * QR_THROTTLE_MS) {
+        qrRegenerationCount = 0; // Reset counter if it's been a while
+    }
     
-    // Save QR as image file for admin dashboard
+    // Terminal-based QR code (for debugging)
+    qrcode.generate(qr, { small: true });
+    
     try {
-        // Make sure the public directory exists
+        // Ensure public directory exists
         const publicDir = path.join(process.cwd(), 'public');
         if (!fs.existsSync(publicDir)) {
             fs.mkdirSync(publicDir, { recursive: true });
@@ -376,10 +419,10 @@ client.on('qr', async (qr) => {
             global.lastQrTimestamp = new Date().toISOString();
             console.log(`QR Code saved to ${qrPath} at ${global.lastQrTimestamp}`);
             
-            // Set a timeout to regenerate QR if not scanned in 40 seconds
+            // Set a timeout to clear QR if not scanned in 60 seconds (increased from 40)
             qrRetryTimeout = setTimeout(() => {
                 console.log('QR code expired, will generate a new one when requested');
-            }, 40000);
+            }, 60000);
         });
         
         qrStream.on('error', (err) => {

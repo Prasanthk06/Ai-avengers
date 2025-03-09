@@ -186,6 +186,17 @@ app.post('/admin/whatsapp/regenerate-qr', requireAdmin, async (req, res) => {
 app.post('/whatsapp-reconnect', requireAdmin, async (req, res) => {
     console.log('WhatsApp reconnection requested by admin');
     
+    // Check if there was a recent reconnection request
+    if (global.lastReconnectTime && (Date.now() - global.lastReconnectTime < 5 * 60 * 1000)) {
+        return res.json({
+            success: false,
+            message: `Please wait at least 5 minutes between reconnection attempts. Last attempt was ${Math.round((Date.now() - global.lastReconnectTime) / 1000 / 60)} minutes ago.`
+        });
+    }
+    
+    // Set last reconnect time
+    global.lastReconnectTime = Date.now();
+    
     try {
         if (client.info) {
             // Get current state information
@@ -196,25 +207,43 @@ app.post('/whatsapp-reconnect', requireAdmin, async (req, res) => {
         // Force client destroy and reinitialize
         console.log('Destroying WhatsApp client...');
         await client.destroy();
-        console.log('Client destroyed, waiting 5 seconds...');
+        console.log('Client destroyed, waiting 15 seconds...');
         
-        // Short delay before reinitialization
-        await new Promise(r => setTimeout(r, 5000));
+        // Longer delay before reinitialization
+        await new Promise(r => setTimeout(r, 15000));
+        
+        // Clear any existing QR throttling
+        if (typeof qrRegenerationCount !== 'undefined') {
+            qrRegenerationCount = 0;
+        }
+        if (typeof lastQrGeneration !== 'undefined') {
+            lastQrGeneration = 0;
+        }
         
         // Initialize again
         console.log('Reinitializing WhatsApp client...');
-        await client.initialize();
-        
-        res.json({ 
-            success: true, 
-            message: 'WhatsApp client restarted. Check logs for details. You may need to scan the QR code again.'
-        });
+        try {
+            await client.initialize();
+            console.log('WhatsApp client reinitialized successfully');
+            
+            res.json({ 
+                success: true, 
+                message: 'WhatsApp client restarted. Please wait for a new QR code to appear (this may take up to 30 seconds). Refresh the page after 30 seconds if no QR appears.'
+            });
+        } catch (initError) {
+            console.error('Failed to initialize WhatsApp client:', initError);
+            res.json({
+                success: false,
+                error: initError.message,
+                message: 'Failed to initialize WhatsApp client. Please try again in 5 minutes.'
+            });
+        }
     } catch (error) {
         console.error('Error during WhatsApp reconnection:', error);
         res.json({ 
             success: false, 
             error: error.message,
-            message: 'Failed to restart WhatsApp client. Check server logs for details.'
+            message: 'Failed to restart WhatsApp client. Please try again in 5 minutes.'
         });
     }
 });
