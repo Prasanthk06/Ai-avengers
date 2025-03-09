@@ -15,6 +15,12 @@ const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB limit
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const AUTH_FOLDER_PATH = path.join(process.cwd(), '.wwebjs_auth');
 const CACHE_FOLDER_PATH = path.join(process.cwd(), '.wwebjs_cache');
+const DEBUG_MODE = true;
+const REDUCE_DELAYS = true; // Flag to reduce delays in message processing
+const PERFORMANCE_MODE = true; // Enable all performance optimizations
+const PRELOAD_USER_DATA = true; // Preload user data for faster responses
+const MAX_CONCURRENT_OPERATIONS = 10; // Limit concurrent operations to prevent overload
+const DIRECT_REPLY_MODE = true; // Use the most direct reply method possible for lowest latency
 
 // Initialize Gemini and Storage
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -27,6 +33,11 @@ const storage = new Storage({
 });
 const bucket = storage.bucket(process.env.GOOGLE_CLOUD_BUCKET_NAME);
 
+// Add this global cache for user data
+const userCache = new Map();
+const messageInProgress = new Set(); // Track messages being processed to prevent duplicates
+let lastCleanup = Date.now();
+
 // Ensure auth and cache directories exist
 function ensureDirectoriesExist() {
     if (!fs.existsSync(AUTH_FOLDER_PATH)) {
@@ -38,9 +49,18 @@ function ensureDirectoriesExist() {
     }
 }
 
-// Cache Management
+// Optimize the cache cleanup to run when needed
 async function manageCache() {
     try {
+        // Clean message tracking set every 5 minutes to prevent memory leaks
+        const now = Date.now();
+        if (now - lastCleanup > 5 * 60 * 1000) {
+            // Clear tracking sets to prevent memory leaks
+            messageInProgress.clear();
+            lastCleanup = now;
+            console.log('Message tracking cache cleared');
+        }
+        
         ensureDirectoriesExist();
         const authPath = AUTH_FOLDER_PATH;
         const files = await fsPromises.readdir(authPath);
@@ -57,16 +77,54 @@ async function manageCache() {
 
 // Run cache cleanup every 10 minutes
 setInterval(manageCache, 10 * 60 * 1000);
+
+// After client initialization but before the event handlers, add this console log
+console.log('Setting up WhatsApp event handlers...');
+
 // Helper Functions
 async function safeSendReply(msg, content) {
+    // For absolutely minimal latency, use a highly optimized direct approach
+    if (DIRECT_REPLY_MODE && PERFORMANCE_MODE) {
+        // For ping commands, use the absolute fastest path
+        if (content.includes('Pong!')) {
+            try {
+                // Direct reply is fastest
+                return await msg.reply(content);
+            } catch (error) {
+                // Fallback to other methods
+                try {
+                    return await client.sendMessage(msg.from, content);
+                } catch (e) {
+                    console.log('Ping reply fallback error:', e.message);
+                    return null;
+                }
+            }
+        }
+    }
+    
     try {
+        // Fast path: try direct reply first
         return await msg.reply(content);
     } catch (error) {
         console.log('Primary sending method failed:', error.message);
+        
         try {
-            return await client.sendMessage(msg.from, content);
+            // Fallback: Get chat directly (more reliable sometimes)
+            const chat = await msg.getChat();
+            return await chat.sendMessage(content);
         } catch (sendError) {
             console.log('Fallback sending failed:', sendError.message);
+            
+            // Last resort: Try direct chat by ID method
+            try {
+                if (msg.from) {
+                    return await client.sendMessage(msg.from, content);
+                }
+            } catch (lastError) {
+                console.log('Last resort sending failed:', lastError.message);
+            }
+            
+            return null;
         }
     }
 }
@@ -142,6 +200,7 @@ function parseDate(dateString) {
         return null;
     }
 }
+
 // Client Configuration
 // Call function to ensure directories exist before initializing client
 ensureDirectoriesExist();
@@ -149,7 +208,7 @@ ensureDirectoriesExist();
 // Add a more stable client ID that doesn't change between sessions
 const STABLE_CLIENT_ID = "main-whatsapp-client";
 
-// Modify the client configuration
+// Modify the client configuration for maximum speed
 const client = new Client({
     authStrategy: new LocalAuth({
         clientId: STABLE_CLIENT_ID,
@@ -157,9 +216,9 @@ const client = new Client({
     }),
     puppeteer: {
         headless: 'new',
-        handleSIGINT: false, // Important to avoid browser hanging on interrupts
-        handleSIGTERM: false, // Important to avoid browser hanging on termination
-        handleSIGHUP: false, // Important to avoid browser hanging on hangups
+        handleSIGINT: false,
+        handleSIGTERM: false,
+        handleSIGHUP: false,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -168,20 +227,34 @@ const client = new Client({
             '--disable-web-security',
             '--disable-features=site-per-process,TranslateUI',
             '--disable-extensions',
+            '--js-flags=--expose-gc',  // Expose garbage collection for better memory management
             '--disable-backgrounding-occluded-windows',
             '--disable-component-extensions-with-background-pages',
             '--disable-ipc-flooding-protection',
-            '--no-default-browser-check',
+            '--aggressive-cache-discard',
+            '--disable-background-networking',
+            '--no-default-browser-check', 
             '--no-first-run'
         ],
         ignoreHTTPSErrors: true,
         defaultViewport: null,
-        timeout: 120000, // 2 minutes
+        timeout: 120000,
+        protocolTimeout: 60000  // Added protocol timeout for better error handling
     },
-    authTimeoutMs: 120000, // Add longer timeout for authentication
-    queueMessages: true,
+    authTimeoutMs: 120000,
+    queueMessages: false, // Process messages in parallel for better responsiveness
+    restartOnCrash: true,
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    restartOnCrash: true
+    webVersionCache: { 
+        type: 'remote',
+        remotePath: 'https://web.whatsapp.com'
+    },
+    // Add a more aggressive keep-alive frequency
+    webSocketKeepAliveInterval: 10000, // 10 seconds keep-alive (was 15)
+    webSocketRestartOnTimeout: true,
+    maxRetries: 5,  // Added retry parameter for better reliability
+    takeoverOnConflict: false, // Avoid conflicts with other sessions
+    disableReconnect: false  // Ensure reconnection is enabled
 });
 
 // Keep-alive strategy
@@ -195,45 +268,46 @@ function startConnectionMonitor() {
     
     connectionMonitor = setInterval(async () => {
         try {
-            // If client is initialized but we haven't been able to get state in 10 minutes
             const now = Date.now();
             const timeSinceLastCheck = now - lastConnectionCheck;
             
-            console.log(`Connection monitor check: Last status check ${Math.round(timeSinceLastCheck/1000/60)} minutes ago`);
-            
-            // Only perform checks if it's been a significant time since the last check
-            if (timeSinceLastCheck < 5 * 60 * 1000) {
-                return; // Skip if less than 5 minutes since last check
+            // Only log every 5 minutes to reduce noise
+            if (timeSinceLastCheck >= 5 * 60 * 1000) {
+                console.log(`Connection monitor check: Last status check ${Math.round(timeSinceLastCheck/1000/60)} minutes ago`);
             }
             
-            // Check if client is connected by trying to get state
+            // Check more frequently for disconnected state
             if (client.pupPage && !client.pupPage.isClosed()) {
                 try {
-                    // Try to get connection state
                     const state = await client.getState();
                     lastConnectionCheck = now;
-                    console.log(`WhatsApp connection state: ${state}`);
                     
-                    // Only attempt reconnect if completely disconnected
+                    // Only log state changes or infrequently
+                    if (global.lastReportedState !== state || timeSinceLastCheck >= 5 * 60 * 1000) {
+                        console.log(`WhatsApp connection state: ${state}`);
+                        global.lastReportedState = state;
+                    }
+                    
+                    // Reconnect if disconnected
                     if (state === 'DISCONNECTED') {
                         console.log('WhatsApp disconnected, attempting reconnect...');
                         attemptReconnect();
                     }
                 } catch (err) {
                     console.log('Error getting connection state:', err.message);
-                    if (timeSinceLastCheck > 15 * 60 * 1000) { // 15 minutes
+                    if (timeSinceLastCheck > 10 * 60 * 1000) { // 10 minutes
                         console.log('Connection appears to be stuck, attempting reconnect...');
                         attemptReconnect();
                     }
                 }
-            } else if (timeSinceLastCheck > 20 * 60 * 1000) { // 20 minutes with no page
+            } else if (timeSinceLastCheck > 10 * 60 * 1000) { // 10 minutes with no page
                 console.log('Client page is closed or unavailable for extended period, attempting reconnect...');
                 attemptReconnect();
             }
         } catch (err) {
             console.error('Connection monitor error:', err.message);
         }
-    }, 5 * 60 * 1000); // Check every 5 minutes instead of 2
+    }, REDUCE_DELAYS ? 60 * 1000 : 5 * 60 * 1000); // Check every 1 minute or 5 minutes
 }
 
 // Add a special function to ensure client is up after Railway deployment
@@ -312,8 +386,24 @@ async function attemptReconnect() {
     }
 }
 
-client.on('ready', () => {
+client.on('ready', async () => {
     console.log('Client is ready!');
+    
+    if (PRELOAD_USER_DATA && PERFORMANCE_MODE) {
+        try {
+            console.log('Preloading user data...');
+            const users = await User.find({ isVerified: true }).lean();
+            users.forEach(user => {
+                if (user.whatsappNumber) {
+                    userCache.set(user.whatsappNumber, user);
+                }
+            });
+            console.log(`Preloaded ${userCache.size} users into cache`);
+        } catch (error) {
+            console.error('Error preloading user data:', error.message);
+        }
+    }
+    
     connectionCheckInterval = setInterval(() => {
         if (!client.pupPage?.isClosed()) {
             console.log('Connection active:', new Date().toISOString());
@@ -367,6 +457,7 @@ Available Commands:
 - Large files will be shared as links
 - Use #help anytime to see this menu
 `;
+
 // Event Handlers
 let lastQrGeneration = 0;
 const QR_THROTTLE_MS = 30000; // Minimum 30 seconds between QR generations
@@ -460,18 +551,87 @@ client.on('auth_failure', msg => {
     console.error('Authentication failure:', msg);
 });
 
+// Add a special message handler for quicker replies to commands
+client.on('message_create', async (msg) => {
+    // Only process commands from your own number
+    if (client.info && msg.from === client.info.wid._serialized && msg.body.startsWith('#')) {
+        console.log('Detected command from self:', msg.body);
+        
+        // Quick ping command for testing
+        if (msg.body === '#ping') {
+            await safeSendReply(msg, 'Pong! Response time test.');
+            console.log('Sent ping response');
+        }
+    }
+});
+
 // Message Handler
 client.on('message', async msg => {
+    // Skip duplicate message processing
+    const messageId = msg.id ? msg.id.id : `${msg.from}-${Date.now()}`;
+    if (messageInProgress.has(messageId)) {
+        return; // Skip duplicate processing
+    }
+    
+    // Mark message as being processed
+    messageInProgress.add(messageId);
+    
+    // Set a timeout to remove from tracking after 30 seconds
+    setTimeout(() => messageInProgress.delete(messageId), 30000);
+    
     try {
+        // Immediate acknowledgment for long-running operations
+        if (REDUCE_DELAYS && PERFORMANCE_MODE) {
+            // Only acknowledge messages that would take time to process
+            if (msg.hasMedia || (msg.body && (msg.body.startsWith('#') || msg.body.length > 50))) {
+                try {
+                    // Fire and forget acknowledgment - don't await
+                    msg.react('👍').catch(() => {}); // React is much faster than reply
+                    
+                    // Use a timeout to avoid blocking the main message processing
+                    setTimeout(() => {
+                        try {
+                            msg.reply('Processing your request...').catch(() => {});
+                        } catch (e) {
+                            // Ignore errors
+                        }
+                    }, 100);
+                } catch (e) {
+                    // Ignore errors in quick acknowledgment
+                }
+            }
+        }
+        
+        // Add extensive debug logging
+        if (DEBUG_MODE) {
+            console.log('=========== NEW MESSAGE RECEIVED ===========');
+            console.log(`ID: ${messageId}`);
+            console.log(`From: ${msg.from}`);
+            console.log(`Body: ${msg.body ? (msg.body.substring(0, 50) + (msg.body.length > 50 ? '...' : '')) : '[empty]'}`);
+            console.log(`Has Media: ${msg.hasMedia}`);
+            console.log(`Timestamp: ${new Date().toISOString()}`);
+            console.log('=============================================');
+        }
+
         console.log(`Message received: ${new Date().toISOString()}`, {
             from: msg.from,
             body: msg.body ? msg.body.substring(0, 20) + (msg.body.length > 20 ? '...' : '') : '[no text]',
             type: msg.hasMedia ? 'media' : 'text',
-            timestamp: msg._data.t
+            timestamp: msg._data ? msg._data.t : 'unknown'
         });
 
         if (msg.from.endsWith('@g.us')) {
             console.log('Ignoring group message');
+            messageInProgress.delete(messageId);
+            return;
+        }
+
+        // Fast path for ping command
+        if (msg.body?.toLowerCase() === '#ping') {
+            console.log('Processing ping request - fast path');
+            const timestamp = Date.now();
+            await msg.reply(`Pong! Timestamp: ${timestamp}`);
+            messageInProgress.delete(messageId);
             return;
         }
 
@@ -479,7 +639,7 @@ client.on('message', async msg => {
         if (msg.body?.startsWith('#verify')) {
             console.log('Processing verification request');
             const code = msg.body.split(' ')[1];
-            const user = await User.findOne({ uniqueCode: code });
+            const user = await getVerifiedUser(msg.from);
             
             if (user) {
                 console.log(`User found for verification: ${user.email}`);
@@ -495,13 +655,43 @@ client.on('message', async msg => {
             return;
         }
 
+        // Process #help command before user verification
+        if (msg.body?.toLowerCase() === '#help') {
+            console.log('Processing help request');
+            
+            const basicHelp = [
+                '*Available Commands:*',
+                '#verify [code] - Verify your account with the unique code',
+                '#help - Show this help message',
+                '#ping - Test response time'
+            ].join('\n');
+            
+            await safeSendReply(msg, basicHelp);
+            
+            // Check user verification for additional commands
+            const user = await getVerifiedUser(msg.from);
+            if (user) {
+                const verifiedHelp = [
+                    '\n*Additional commands for verified users:*',
+                    'Send any media file to save it to your account',
+                    '#files - List your recently uploaded files',
+                    '#files [category] - List files in a specific category',
+                    '#search [keyword] - Search your files for a keyword'
+                ].join('\n');
+                
+                await safeSendReply(msg, verifiedHelp);
+            }
+            
+            return;
+        }
+
         // Check user verification
-        const user = await User.findOne({ whatsappNumber: msg.from, isVerified: true });
+        const user = await getVerifiedUser(msg.from);
         if (!user) {
             console.log(`Unverified user or number not found: ${msg.from}`);
             if (msg.body && !msg.body.startsWith('#')) {
                 // If it's a regular message and not a command, send a hint
-                await safeSendReply(msg, 'Please verify your account first. Use the #verify command followed by your unique code.');
+                await safeSendReply(msg, 'Please verify your account first. Use the #verify command followed by your unique code. Or type #help for assistance.');
             }
             return;
         }
@@ -741,6 +931,24 @@ async function formatSearchResponse(files, keyword) {
         response += '\n';
     }
     return response;
+}
+
+// Create a faster user lookup function using cache
+async function getVerifiedUser(phoneNumber) {
+    // Fast path: check cache first
+    if (PERFORMANCE_MODE && userCache.has(phoneNumber)) {
+        return userCache.get(phoneNumber);
+    }
+    
+    // Slow path: database lookup
+    const user = await User.findOne({ whatsappNumber: phoneNumber, isVerified: true }).lean();
+    
+    // Update cache for future lookups
+    if (user && PERFORMANCE_MODE) {
+        userCache.set(phoneNumber, user);
+    }
+    
+    return user;
 }
 
 // If safePageOperation doesn't exist, add this function, otherwise update it

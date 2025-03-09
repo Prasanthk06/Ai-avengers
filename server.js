@@ -9,6 +9,23 @@ const { User, Media } = require('./database');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
 
+// Use either native fetch (Node.js 18+) or node-fetch for older versions
+let fetch;
+try {
+    fetch = globalThis.fetch; // Use native fetch if available (Node.js 18+)
+    if (!fetch) throw new Error('Native fetch not available');
+} catch (e) {
+    // Fallback to require - this will throw an error if node-fetch is not installed
+    // but that's better than silently failing
+    try {
+        console.log('Native fetch not available, attempting to use node-fetch');
+        fetch = require('node-fetch');
+    } catch (err) {
+        console.warn('Warning: Neither native fetch nor node-fetch available. Self-ping will be disabled.');
+        fetch = () => Promise.resolve(); // Dummy function that does nothing
+    }
+}
+
 const app = express();
 app.set('view engine','ejs')
 app.use(express.json());
@@ -66,23 +83,38 @@ const requireAuth = (req, res, next) => {
     next();
 };
 
-// Admin route middleware
+// Modify the admin route middleware to reduce excessive checks
 const requireAdmin = (req, res, next) => {
-    console.log('Admin check - Session:', req.session);
+    // Skip verbose logging for status check routes
+    const isStatusCheck = req.path === '/whatsapp-status' || 
+                         req.path.includes('/status') || 
+                         req.originalUrl.includes('/status');
     
     if (!req.session.userId) {
-        console.log('Admin check failed - no session - redirecting to login');
+        if (!isStatusCheck) console.log('Admin check failed - no session - redirecting to login');
         return res.redirect('/login');
+    }
+    
+    // Cache admin status in session to reduce DB queries
+    if (req.session.isAdmin === true) {
+        // Already verified as admin, skip DB check
+        if (!isStatusCheck) console.log('Admin check passed - using cached status');
+        return next();
     }
     
     User.findById(req.session.userId)
         .then(user => {
-            console.log('Admin check - User found:', user ? user.isAdmin : 'No user');
+            if (!isStatusCheck) console.log('Admin check - User found:', user ? user.isAdmin : 'No user');
+            
             if (!user || !user.isAdmin) {
-                console.log('Admin check failed - not an admin');
+                if (!isStatusCheck) console.log('Admin check failed - not an admin');
                 return res.status(403).send('Access denied');
             }
-            console.log('Admin check passed for user:', user.email);
+            
+            // Cache the admin status in session
+            req.session.isAdmin = true;
+            
+            if (!isStatusCheck) console.log('Admin check passed for user:', user.email);
             next();
         })
         .catch(err => {
@@ -91,9 +123,15 @@ const requireAdmin = (req, res, next) => {
         });
 };
 
-// WhatsApp connection status route
+// Modify the WhatsApp status route
 app.get('/whatsapp-status', requireAdmin, (req, res) => {
-    // Check current time to ensure fresh status
+    // Check if we have a cached status and it's recent (less than 10 seconds old)
+    if (global.cachedWhatsAppStatus && 
+        (Date.now() - global.cachedWhatsAppStatus.timestamp < 10000)) {
+        return res.json(global.cachedWhatsAppStatus);
+    }
+    
+    // Get current time to ensure fresh status
     const now = new Date();
     
     // Build status response object
@@ -117,13 +155,15 @@ app.get('/whatsapp-status', requireAdmin, (req, res) => {
             status.qrFileExists = false;
         }
     } catch (error) {
-        console.error('Error checking QR file:', error);
         status.qrFileExists = false;
         status.qrFileError = error.message;
     }
     
-    // If QR timestamp exists but file doesn't, we don't reset the timestamp
-    // anymore to avoid race conditions with QR generation
+    // Cache the status
+    global.cachedWhatsAppStatus = {
+        ...status,
+        timestamp: Date.now() // Add cache timestamp
+    };
     
     res.json(status);
 });
@@ -587,4 +627,38 @@ app.get('/logout', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+});
+
+// Setup to prevent Railway container hibernation
+const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes (just under Railway's 15-minute inactivity limit)
+function pingServer() {
+    try {
+        console.log(`[${new Date().toISOString()}] Self-ping to prevent hibernation`);
+        // This keeps the process alive even when no external requests are coming in
+        fetch(`https://${process.env.RAILWAY_STATIC_URL || 'localhost:3000'}/health-check`)
+            .catch(e => {/* Ignore fetch errors */});
+    } catch (err) {
+        // Ignore all errors
+    }
+}
+
+// Add this at the end of your file (after app.listen)
+// Add a health check endpoint that doesn't require authentication
+app.get('/health-check', (req, res) => {
+    res.status(200).send('OK');
+});
+
+// Start the self-ping interval
+const pingInterval = setInterval(pingServer, PING_INTERVAL);
+pingServer(); // Initial ping
+
+// Ensure clean shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, cleaning up...');
+    clearInterval(pingInterval);
+    
+    // Give pending operations 5 seconds to complete before exiting
+    setTimeout(() => {
+        process.exit(0);
+    }, 5000);
 });
