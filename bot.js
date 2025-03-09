@@ -22,6 +22,9 @@ const PRELOAD_USER_DATA = true; // Preload user data for faster responses
 const MAX_CONCURRENT_OPERATIONS = 10; // Limit concurrent operations to prevent overload
 const DIRECT_REPLY_MODE = true; // Use the most direct reply method possible for lowest latency
 
+// Client reference for external updates
+let clientRef;
+
 // Initialize Gemini and Storage
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const storage = new Storage({
@@ -93,7 +96,7 @@ async function safeSendReply(msg, content) {
             } catch (error) {
                 // Fallback to other methods
                 try {
-                    return await client.sendMessage(msg.from, content);
+                    return await clientRef.sendMessage(msg.from, content);
                 } catch (e) {
                     console.log('Ping reply fallback error:', e.message);
                     return null;
@@ -118,7 +121,7 @@ async function safeSendReply(msg, content) {
             // Last resort: Try direct chat by ID method
             try {
                 if (msg.from) {
-                    return await client.sendMessage(msg.from, content);
+                    return await clientRef.sendMessage(msg.from, content);
                 }
             } catch (lastError) {
                 console.log('Last resort sending failed:', lastError.message);
@@ -256,6 +259,9 @@ const client = new Client({
     takeoverOnConflict: false, // Avoid conflicts with other sessions
     disableReconnect: false  // Ensure reconnection is enabled
 });
+
+// Store the reference for updateClient function
+clientRef = client;
 
 // Keep-alive strategy
 // This will regularly check if the client is still connected and try to reconnect if not
@@ -1128,5 +1134,37 @@ patchClientMethods();
 
 client.initialize();
 
+// Export the client for use in other modules
 module.exports = client;
+
+// Add function to allow updating the client reference
+// This is used for emergency resets without restarting the server
+module.exports.updateClient = function(newClient) {
+    try {
+        // Update the reference
+        clientRef = newClient;
+        
+        // If possible, modify the module.exports to also be the new client
+        const originalExport = Object.assign({}, module.exports);
+        
+        // Replace the default export with the new client
+        Object.setPrototypeOf(module.exports, Object.getPrototypeOf(newClient));
+        Object.assign(module.exports, newClient);
+        
+        // Restore any custom properties/methods from the original export
+        for (const [key, value] of Object.entries(originalExport)) {
+            if (key !== 'updateClient' && typeof value === 'function') {
+                module.exports[key] = value;
+            }
+        }
+        
+        // Make sure updateClient is still available
+        module.exports.updateClient = originalExport.updateClient;
+        
+        return true;
+    } catch (error) {
+        console.error('Error in updateClient:', error);
+        return false;
+    }
+};
 

@@ -806,48 +806,66 @@ app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
         try {
             console.log('Starting complete WhatsApp client reset...');
             
+            // Store reference to the old client first
+            const oldClient = global.client || client;
+            
             // 1. First try normal cleanup
             console.log('Attempting graceful cleanup first...');
             try {
-                if (client) {
+                if (oldClient) {
                     // Try to close the browser directly
-                    if (client.pupBrowser) {
+                    if (oldClient.pupBrowser) {
                         try {
-                            await client.pupBrowser.close().catch(() => {});
+                            await oldClient.pupBrowser.close().catch(() => {});
                         } catch (e) {
                             console.log('Browser close error (non-fatal):', e.message);
                         }
                     }
                     
-                    // Try to destroy
+                    // Try to destroy the client
                     try {
-                        await client.destroy().catch(() => {});
+                        await oldClient.destroy().catch(() => {});
+                        console.log('Safe destroy called');
                     } catch (e) {
                         console.log('Client destroy error (non-fatal):', e.message);
                     }
                 }
             } catch (err) {
-                console.log('Graceful cleanup failed (continuing):', err.message);
+                console.log('Protocol error detected, trying alternative initialization...', err.message);
             }
             
             // 2. Manually clear all references
             console.log('Forcefully clearing all WhatsApp client references...');
-            if (client) {
-                try {
+            try {
+                if (oldClient) {
                     // Nullify all properties that might hold references
-                    client.pupBrowser = null;
-                    client.pupPage = null;
-                    if (client.authStrategy) {
-                        client.authStrategy.client = null;
+                    if (oldClient.pupBrowser) oldClient.pupBrowser = null;
+                    if (oldClient.pupPage) oldClient.pupPage = null;
+                    if (oldClient.authStrategy) {
+                        oldClient.authStrategy.client = null;
                     }
                     
                     // Clear any event listeners
-                    if (typeof client.removeAllListeners === 'function') {
-                        client.removeAllListeners();
+                    if (typeof oldClient.removeAllListeners === 'function') {
+                        oldClient.removeAllListeners();
                     }
-                } catch (e) {
-                    console.log('Error clearing references (non-fatal):', e.message);
                 }
+                
+                // Clear global references
+                global.client = null;
+                
+                // Try to clear require cache for the bot module
+                try {
+                    const botModulePath = require.resolve('./bot');
+                    if (require.cache[botModulePath]) {
+                        delete require.cache[botModulePath];
+                        console.log('Cleared bot.js module from require cache');
+                    }
+                } catch (cacheError) {
+                    console.log('Error clearing module cache (non-fatal):', cacheError.message);
+                }
+            } catch (e) {
+                console.log('Error clearing references (non-fatal):', e.message);
             }
             
             // 3. Clean up old session files
@@ -902,31 +920,40 @@ app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
             // 6. Create a completely new client instance with clean state
             console.log('Recreating WhatsApp client with clean state...');
             try {
+                // Re-require the dependencies to ensure fresh instances
                 const { Client, LocalAuth } = require('whatsapp-web.js');
+                const qrcode = require('qrcode-terminal');
+                
+                // Define auth before using it to avoid the null error
+                const authStrategy = new LocalAuth({
+                    clientId: "client-one",
+                    dataPath: path.join(process.cwd(), '.wwebjs_auth')
+                });
                 
                 // Create new client with very basic settings
-                global.client = new Client({
-                    authStrategy: new LocalAuth({
-                        clientId: "client-one",
-                        dataPath: path.join(process.cwd(), '.wwebjs_auth')
-                    }),
+                const newClient = new Client({
+                    authStrategy: authStrategy,
                     puppeteer: {
                         headless: 'new',
                         args: [
                             '--no-sandbox',
                             '--disable-setuid-sandbox',
                             '--disable-gpu',
-                            '--disable-dev-shm-usage'
+                            '--disable-dev-shm-usage',
+                            '--disable-web-security',
+                            '--no-default-browser-check', 
+                            '--no-first-run'
                         ]
                     }
                 });
                 
-                // Replace the module exports
-                client = global.client;
+                // Set to global scope
+                global.client = newClient;
                 
                 // Set up minimal event handlers
-                client.on('qr', (qr) => {
+                newClient.on('qr', (qr) => {
                     try {
+                        // Generate terminal QR
                         qrcode.generate(qr, { small: true });
                         console.log('QR Code generated! Scan it with your WhatsApp');
                         
@@ -941,8 +968,9 @@ app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
                             
                             // Set timestamp when ready
                             qrStream.on('finish', () => {
+                                // Update global timestamp
                                 global.lastQrTimestamp = new Date().toISOString();
-                                console.log('QR Code saved to file after complete reset');
+                                console.log('QR Code saved to file after complete reset at:', global.lastQrTimestamp);
                             });
                             
                             qrStream.on('error', (e) => {
@@ -956,18 +984,78 @@ app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
                     }
                 });
                 
-                client.on('ready', () => {
-                    console.log('Client is ready!');
+                newClient.on('ready', () => {
+                    console.log('Client is ready after complete reset!');
+                });
+                
+                // Add error handling
+                newClient.on('disconnected', (reason) => {
+                    console.log('Client disconnected after reset:', reason);
                 });
                 
                 // Initialize the client
                 console.log('Initializing new WhatsApp client...');
-                await client.initialize();
+                await newClient.initialize();
                 console.log('WhatsApp client successfully reinitialized with clean state');
+                
+                // Update the exported module without reassigning the constant
+                // This makes the new client available throughout the application
+                try {
+                    const botModule = require('./bot');
+                    if (typeof botModule.updateClient === 'function') {
+                        botModule.updateClient(newClient);
+                        console.log('Successfully updated client reference in bot.js');
+                    } else {
+                        console.log('Warning: updateClient function not found in bot.js');
+                        console.log('IMPORTANT: Server restart may be required to fully apply changes');
+                    }
+                } catch (moduleErr) {
+                    console.log('Error updating module exports:', moduleErr.message);
+                    console.log('IMPORTANT: Server restart may be required to fully apply changes');
+                }
                 
             } catch (recreateError) {
                 console.error('Failed to recreate WhatsApp client:', recreateError);
                 console.log('IMPORTANT: Server restart may be required to recover WhatsApp functionality');
+                
+                // Create a restart script as fallback
+                try {
+                    // Create a restart script in the root directory
+                    const restartScriptPath = path.join(process.cwd(), 'restart-whatsapp.sh');
+                    const isWindows = process.platform === 'win32';
+                    
+                    if (isWindows) {
+                        // Windows batch script
+                        const batchContent = `@echo off
+echo Restarting WhatsApp service...
+timeout /t 5
+taskkill /f /pid ${process.pid}
+echo Server terminated, restarting...
+start cmd /c "node server.js"
+exit
+`;
+                        fs.writeFileSync(path.join(process.cwd(), 'restart-whatsapp.bat'), batchContent);
+                        console.log('Created Windows restart script: restart-whatsapp.bat');
+                        console.log('If WhatsApp is still not working, run the script manually as administrator');
+                    } else {
+                        // Unix shell script
+                        const shellContent = `#!/bin/bash
+echo "Restarting WhatsApp service..."
+sleep 5
+kill -9 ${process.pid}
+echo "Server terminated, restarting..."
+node server.js &
+exit 0
+`;
+                        fs.writeFileSync(restartScriptPath, shellContent);
+                        fs.chmodSync(restartScriptPath, '755');
+                        console.log('Created restart script: restart-whatsapp.sh');
+                        console.log('If WhatsApp is still not working, run the script manually:');
+                        console.log('  chmod +x restart-whatsapp.sh && ./restart-whatsapp.sh');
+                    }
+                } catch (scriptErr) {
+                    console.error('Error creating restart script:', scriptErr);
+                }
             }
             
         } catch (outerError) {

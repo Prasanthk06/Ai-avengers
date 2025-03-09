@@ -1,0 +1,23 @@
+[0310/022919.113:ERROR:cache_util_win.cc(20)] Unable to move the cache: Access is denied. (0x5)
+[0310/022919.113:ERROR:disk_cache.cc(205)] Unable to create cache
+[0310/022919.114:ERROR:gpu_disk_cache.cc(673)] Gpu Cache Creation failed: -2
+[0310/022919.114:ERROR:cache_util_win.cc(20)] Unable to move the cache: Access is denied. (0x5)
+[0310/022919.114:ERROR:disk_cache.cc(205)] Unable to create cache
+[0310/022919.114:ERROR:gpu_disk_cache.cc(673)] Gpu Cache Creation failed: -2
+[0310/022919.599:WARNING:sqlite_persistent_cookie_store.cc(1662)] Unable to delete session cookies.
+[0310/022919.658:ERROR:cache_util_win.cc(20)] Unable to move the cache: Access is denied. (0x5)
+[0310/022919.659:ERROR:disk_cache.cc(205)] Unable to create cache
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Feature xr-spatial-tracking's parameters are ignored.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Origin trial controlled feature not enabled: 'attribution-reporting'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Unrecognized feature: 'compute-pressure'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Origin trial controlled feature not enabled: 'interest-cohort'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Unrecognized feature: 'private-state-token-issuance'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Origin trial controlled feature not enabled: 'shared-storage'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Unrecognized feature: 'shared-storage-select-url'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Unrecognized feature: 'private-state-token-redemption'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Unrecognized feature: 'unload'.", source:  (0)
+[0310/022920.143:INFO:CONSOLE(0)] "Error with Permissions-Policy header: Unrecognized feature: 'window-management'.", source:  (0)
+[0310/022923.317:INFO:CONSOLE(158)] "Event handler of 'x-storagemutated-1' event must be added on the initial evaluation of worker script.", source: https://static.whatsapp.net/rsrc.php/v4/y6/r/y7CbmHnRTbA.js (158)
+[0310/022928.848:INFO:CONSOLE(0)] "The resource https://static.whatsapp.net/rsrc-translations.php/v8iim14/yW/l/en_GB/9Bsamhsylt4MXdj3pM2oe2rJ78-CBA_c57Heh5eE9q-5vsWqehdEtWw.js was preloaded using link preload but not used within a few seconds from the window's load event. Please make sure it has an appropriate `as` value and it is preloaded intentionally.", source: https://web.whatsapp.com/ (0)
+[0310/022928.848:INFO:CONSOLE(0)] "The resource https://static.whatsapp.net/rsrc-translations.php/v8iykA4/yd/l/en_GB/aaTSJXm981F.js was preloaded using link preload but not used within a few seconds from the window's load event. Please make sure it has an appropriate `as` value and it is preloaded intentionally.", source: https://web.whatsapp.com/ (0)
+[0310/022928.849:INFO:CONSOLE(0)] "The resource https://static.whatsapp.net/rsrc-translations.php/v8i-Cg4/yy/l/en_GB/AU9D-WznO_A.js was preloaded using link preload but not used within a few seconds from the window's load event. Please make sure it has an appropriate `as` value and it is preloaded intentionally.", source: https://web.whatsapp.com/ (0)
