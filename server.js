@@ -789,3 +789,189 @@ app.use((req, res, next) => {
     
     next();
 });
+
+// Add this route after the other WhatsApp routes
+// Complete WhatsApp reset route (emergency use only)
+app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
+    console.log('Admin requested COMPLETE WhatsApp reset - this is a nuclear option');
+    
+    // Send response immediately
+    res.json({
+        success: true,
+        message: 'Complete WhatsApp reset initiated. This will take up to 2 minutes and will restart the entire WhatsApp system.'
+    });
+    
+    // Execute outside the request-response cycle
+    setTimeout(async () => {
+        try {
+            console.log('Starting complete WhatsApp client reset...');
+            
+            // 1. First try normal cleanup
+            console.log('Attempting graceful cleanup first...');
+            try {
+                if (client) {
+                    // Try to close the browser directly
+                    if (client.pupBrowser) {
+                        try {
+                            await client.pupBrowser.close().catch(() => {});
+                        } catch (e) {
+                            console.log('Browser close error (non-fatal):', e.message);
+                        }
+                    }
+                    
+                    // Try to destroy
+                    try {
+                        await client.destroy().catch(() => {});
+                    } catch (e) {
+                        console.log('Client destroy error (non-fatal):', e.message);
+                    }
+                }
+            } catch (err) {
+                console.log('Graceful cleanup failed (continuing):', err.message);
+            }
+            
+            // 2. Manually clear all references
+            console.log('Forcefully clearing all WhatsApp client references...');
+            if (client) {
+                try {
+                    // Nullify all properties that might hold references
+                    client.pupBrowser = null;
+                    client.pupPage = null;
+                    if (client.authStrategy) {
+                        client.authStrategy.client = null;
+                    }
+                    
+                    // Clear any event listeners
+                    if (typeof client.removeAllListeners === 'function') {
+                        client.removeAllListeners();
+                    }
+                } catch (e) {
+                    console.log('Error clearing references (non-fatal):', e.message);
+                }
+            }
+            
+            // 3. Clean up old session files
+            console.log('Cleaning up WhatsApp session files...');
+            try {
+                const authPath = path.join(process.cwd(), '.wwebjs_auth');
+                const sessionPath = path.join(authPath, 'session-client-one');
+                
+                // Delete QR file
+                const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+                if (fs.existsSync(qrPath)) {
+                    fs.unlinkSync(qrPath);
+                    console.log('Deleted QR code file');
+                }
+                
+                // Don't delete the entire session to preserve login, but clean temporary files
+                if (fs.existsSync(sessionPath)) {
+                    const tempFiles = ['Default/Cache', 'Default/Code Cache', 'Default/GPUCache', 
+                                      'Default/Service Worker', 'Default/Session Storage'];
+                    
+                    for (const tempDir of tempFiles) {
+                        const fullPath = path.join(sessionPath, tempDir);
+                        if (fs.existsSync(fullPath)) {
+                            try {
+                                // Use rm with recursive option for directories
+                                fs.rmSync(fullPath, { recursive: true, force: true });
+                                console.log(`Cleaned up ${tempDir}`);
+                            } catch (e) {
+                                console.log(`Failed to clean ${tempDir}:`, e.message);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.log('Session cleanup error (non-fatal):', err.message);
+            }
+            
+            // 4. Force garbage collection
+            if (global.gc) {
+                try {
+                    global.gc();
+                    console.log('Forced garbage collection');
+                } catch (e) {
+                    console.log('GC error (non-fatal):', e.message);
+                }
+            }
+            
+            // 5. Wait for all resources to be fully released
+            console.log('Waiting 20 seconds for full resource release...');
+            await new Promise(resolve => setTimeout(resolve, 20000));
+            
+            // 6. Create a completely new client instance with clean state
+            console.log('Recreating WhatsApp client with clean state...');
+            try {
+                const { Client, LocalAuth } = require('whatsapp-web.js');
+                
+                // Create new client with very basic settings
+                global.client = new Client({
+                    authStrategy: new LocalAuth({
+                        clientId: "client-one",
+                        dataPath: path.join(process.cwd(), '.wwebjs_auth')
+                    }),
+                    puppeteer: {
+                        headless: 'new',
+                        args: [
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-gpu',
+                            '--disable-dev-shm-usage'
+                        ]
+                    }
+                });
+                
+                // Replace the module exports
+                client = global.client;
+                
+                // Set up minimal event handlers
+                client.on('qr', (qr) => {
+                    try {
+                        qrcode.generate(qr, { small: true });
+                        console.log('QR Code generated! Scan it with your WhatsApp');
+                        
+                        // Save QR code to file
+                        try {
+                            const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+                            const qrCode = require('qr-image');
+                            const qrImg = qrCode.image(qr, { type: 'png' });
+                            const qrStream = fs.createWriteStream(qrPath);
+                            
+                            qrImg.pipe(qrStream);
+                            
+                            // Set timestamp when ready
+                            qrStream.on('finish', () => {
+                                global.lastQrTimestamp = new Date().toISOString();
+                                console.log('QR Code saved to file after complete reset');
+                            });
+                            
+                            qrStream.on('error', (e) => {
+                                console.log('Error saving QR file:', e.message);
+                            });
+                        } catch (qrError) {
+                            console.log('Error creating QR file:', qrError.message);
+                        }
+                    } catch (e) {
+                        console.log('QR code generation error:', e.message);
+                    }
+                });
+                
+                client.on('ready', () => {
+                    console.log('Client is ready!');
+                });
+                
+                // Initialize the client
+                console.log('Initializing new WhatsApp client...');
+                await client.initialize();
+                console.log('WhatsApp client successfully reinitialized with clean state');
+                
+            } catch (recreateError) {
+                console.error('Failed to recreate WhatsApp client:', recreateError);
+                console.log('IMPORTANT: Server restart may be required to recover WhatsApp functionality');
+            }
+            
+        } catch (outerError) {
+            console.error('Outer error in complete WhatsApp reset:', outerError);
+        }
+    }, 1000);
+});

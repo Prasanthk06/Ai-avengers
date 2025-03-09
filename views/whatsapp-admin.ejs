@@ -76,6 +76,7 @@
                         <button id="restart-client" class="btn btn-warning">Restart Connection</button>
                         <button id="regenerate-qr" class="btn btn-info">Regenerate QR Code</button>
                         <button id="force-reconnect" class="btn btn-danger mt-2">Force Reconnect</button>
+                        <button id="complete-reset" class="btn btn-dark mt-2">Complete Reset</button>
                     </div>
                 </div>
                 
@@ -416,6 +417,126 @@
                 const button = document.getElementById('force-reconnect');
                 button.disabled = false;
                 button.textContent = 'Force Reconnect';
+            }
+        });
+        
+        // Complete Reset button handler
+        document.getElementById('complete-reset').addEventListener('click', async function() {
+            if (!confirm('⚠️ WARNING: This is an emergency option that completely rebuilds the WhatsApp connection.' + 
+                        '\n\nUse this ONLY if other options have failed.' +
+                        '\n\nThis will take about 2 minutes and you will need to scan the QR code again.' +
+                        '\n\nAre you absolutely sure you want to proceed?')) {
+                return;
+            }
+            
+            // Double confirm
+            if (!confirm('This is your last chance to cancel. Continue with complete reset?')) {
+                return;
+            }
+            
+            try {
+                const button = this;
+                button.disabled = true;
+                button.textContent = 'Resetting...';
+                
+                // Disable all buttons
+                document.querySelectorAll('.actions button').forEach(btn => {
+                    btn.disabled = true;
+                });
+                
+                // Set a message immediately with detailed explanation
+                document.getElementById('qr-status').innerHTML = `
+                    <div class="alert alert-danger">
+                        <h4 class="alert-heading">Emergency Reset In Progress</h4>
+                        <p><strong>Complete system reset has been initiated.</strong></p>
+                        <p>This process will:</p>
+                        <ol>
+                            <li>Destroy the current WhatsApp browser session</li>
+                            <li>Clear all connection references and cached data</li>
+                            <li>Create a completely new WhatsApp client instance</li>
+                            <li>Generate a fresh QR code for scanning</li>
+                        </ol>
+                        <p>Please wait approximately 2 minutes for the process to complete.</p>
+                        <p>DO NOT refresh the page or click any buttons during this process.</p>
+                        <div class="progress mt-3">
+                            <div class="progress-bar bg-danger progress-bar-striped progress-bar-animated" 
+                                 role="progressbar" 
+                                 aria-valuenow="0" 
+                                 aria-valuemin="0" 
+                                 aria-valuemax="100" 
+                                 style="width: 0%">
+                            </div>
+                        </div>
+                        <p class="text-muted mt-2" id="progress-message">Starting emergency reset...</p>
+                    </div>
+                `;
+                
+                // Start progress animation (120 seconds total)
+                const progressBar = document.querySelector('.progress-bar');
+                const progressMessage = document.getElementById('progress-message');
+                let progress = 0;
+                
+                const progressInterval = setInterval(() => {
+                    progress += 1;
+                    if (progress <= 100) {
+                        progressBar.style.width = `${progress}%`;
+                        progressBar.setAttribute('aria-valuenow', progress);
+                        
+                        // Update progress message at certain points
+                        if (progress === 5) {
+                            progressMessage.textContent = 'Closing existing WhatsApp connections...';
+                        } else if (progress === 15) {
+                            progressMessage.textContent = 'Cleaning up browser resources...';
+                        } else if (progress === 30) {
+                            progressMessage.textContent = 'Clearing application references...';
+                        } else if (progress === 45) {
+                            progressMessage.textContent = 'Cleaning up session files...';
+                        } else if (progress === 60) {
+                            progressMessage.textContent = 'Waiting for resource release...';
+                        } else if (progress === 75) {
+                            progressMessage.textContent = 'Creating new WhatsApp client...';
+                        } else if (progress === 90) {
+                            progressMessage.textContent = 'Initializing new connection...';
+                        } else if (progress === 100) {
+                            progressMessage.textContent = 'Process complete! The page will refresh in 10 seconds.';
+                            
+                            // After reaching 100%, wait 10 seconds and refresh the page
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 10000);
+                            
+                            clearInterval(progressInterval);
+                        }
+                    }
+                }, 1200); // 120 seconds total (100 * 1200ms = 120000ms = 2 minutes)
+                
+                // Call the API to perform the complete reset
+                try {
+                    const response = await fetch('/admin/whatsapp/complete-reset', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    
+                    const data = await response.json();
+                    console.log('Complete reset response:', data);
+                    
+                    // Don't need to handle the response - the progress bar will guide the user
+                } catch (apiError) {
+                    console.error('Error during API call:', apiError);
+                    // Don't interrupt the progress indication - the process might still be working
+                }
+                
+            } catch (error) {
+                console.error('Error initiating complete reset:', error);
+                alert('An error occurred while initiating the reset. The process may or may not be running in the background.');
+                
+                // Re-enable buttons after 3 minutes regardless of what happened
+                setTimeout(() => {
+                    document.querySelectorAll('.actions button').forEach(btn => {
+                        btn.disabled = false;
+                    });
+                    document.getElementById('complete-reset').textContent = 'Complete Reset';
+                }, 3 * 60 * 1000);
             }
         });
         
