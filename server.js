@@ -182,6 +182,43 @@ app.post('/admin/whatsapp/regenerate-qr', requireAdmin, async (req, res) => {
     }
 });
 
+// WhatsApp connection troubleshooting route
+app.post('/whatsapp-reconnect', requireAdmin, async (req, res) => {
+    console.log('WhatsApp reconnection requested by admin');
+    
+    try {
+        if (client.info) {
+            // Get current state information
+            const state = await client.getState().catch(e => 'ERROR: ' + e.message);
+            console.log(`Current WhatsApp state before reconnect: ${state}`);
+        }
+        
+        // Force client destroy and reinitialize
+        console.log('Destroying WhatsApp client...');
+        await client.destroy();
+        console.log('Client destroyed, waiting 5 seconds...');
+        
+        // Short delay before reinitialization
+        await new Promise(r => setTimeout(r, 5000));
+        
+        // Initialize again
+        console.log('Reinitializing WhatsApp client...');
+        await client.initialize();
+        
+        res.json({ 
+            success: true, 
+            message: 'WhatsApp client restarted. Check logs for details. You may need to scan the QR code again.'
+        });
+    } catch (error) {
+        console.error('Error during WhatsApp reconnection:', error);
+        res.json({ 
+            success: false, 
+            error: error.message,
+            message: 'Failed to restart WhatsApp client. Check server logs for details.'
+        });
+    }
+});
+
 app.get('/', (req, res) => {
     res.render('landing');
 });

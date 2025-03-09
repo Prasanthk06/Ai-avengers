@@ -152,7 +152,7 @@ const client = new Client({
         dataPath: AUTH_FOLDER_PATH
     }),
     puppeteer: {
-        headless: IS_PRODUCTION ? 'new' : false,
+        headless: 'new', // Always use headless in Railway
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -162,17 +162,102 @@ const client = new Client({
             '--aggressive-cache-discard',
             '--disable-features=IsolateOrigins,site-per-process',
             '--disable-site-isolation-trials',
-            '--single-process', // Added for better Railway compatibility
-            '--use-gl=egl' // Helps with some cloud environments
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-breakpad',
+            '--disable-component-extensions-with-background-pages',
+            '--disable-dev-shm-usage',
+            '--disable-domain-reliability',
+            '--disable-hang-monitor',
+            '--disable-ipc-flooding-protection',
+            '--disable-renderer-backgrounding',
+            '--disable-sync',
+            '--disable-translate',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--no-default-browser-check'
         ],
         defaultViewport: null,
-        timeout: 0
+        timeout: 0,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null // Support for custom Chromium
     },
-    queueMessages: true, // Changed to true for better retry handling
+    queueMessages: true,
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 10000, // Increased timeout
-    restartOnAuthFail: true, // Added to auto restart on auth failures
+    takeoverTimeoutMs: 15000, // Increased timeout further
+    restartOnAuthFail: true,
+    disableReconnect: false, // Ensure reconnection is enabled
+    bypassCSP: true, // May help with connection issues
 });
+
+// Keep-alive strategy
+// This will regularly check if the client is still connected and try to reconnect if not
+let lastConnectionCheck = Date.now();
+let connectionMonitor;
+
+// Start connection monitoring
+function startConnectionMonitor() {
+    if (connectionMonitor) clearInterval(connectionMonitor);
+    
+    connectionMonitor = setInterval(async () => {
+        try {
+            // If client is initialized but we haven't been able to get state in 5 minutes
+            const now = Date.now();
+            const timeSinceLastCheck = now - lastConnectionCheck;
+            
+            console.log(`Connection monitor check: Last status check ${Math.round(timeSinceLastCheck/1000/60)} minutes ago`);
+            
+            // Check if client is connected by trying to get state
+            if (client.pupPage && !client.pupPage.isClosed()) {
+                try {
+                    // Try to get connection state
+                    const state = await client.getState();
+                    lastConnectionCheck = now;
+                    console.log(`WhatsApp connection state: ${state}`);
+                    
+                    // If we're not connected, try to reconnect
+                    if (state !== 'CONNECTED') {
+                        console.log('WhatsApp not in CONNECTED state, attempting reconnect...');
+                        attemptReconnect();
+                    }
+                } catch (err) {
+                    console.log('Error getting connection state:', err.message);
+                    if (timeSinceLastCheck > 5 * 60 * 1000) { // 5 minutes
+                        console.log('Connection appears to be stuck, attempting reconnect...');
+                        attemptReconnect();
+                    }
+                }
+            } else {
+                console.log('Client page is closed or unavailable, attempting reconnect...');
+                attemptReconnect();
+            }
+        } catch (err) {
+            console.error('Connection monitor error:', err.message);
+        }
+    }, 2 * 60 * 1000); // Check every 2 minutes
+}
+
+// Add a special function to ensure client is up after Railway deployment
+setTimeout(() => {
+    // Check client status 2 minutes after startup
+    console.log('Performing post-startup connection check...');
+    
+    if (!client.info) {
+        console.log('Client appears to be disconnected, attempting to initialize...');
+        client.initialize().catch(e => {
+            console.error('Failed to initialize client:', e.message);
+        });
+    } else {
+        console.log('Client is connected and ready');
+    }
+    
+    // Start the ongoing connection monitor
+    startConnectionMonitor();
+}, 2 * 60 * 1000);
 
 // Connection monitoring with improved error handling
 let connectionCheckInterval;
@@ -214,7 +299,24 @@ client.on('ready', () => {
 client.on('disconnected', async (reason) => {
     console.log('Client disconnected:', reason);
     clearInterval(connectionCheckInterval);
-    await client.initialize();
+    
+    // Record the disconnection time
+    const disconnectTime = new Date().toISOString();
+    console.log(`Disconnection recorded at ${disconnectTime}`);
+    
+    // Wait a moment before trying to reconnect
+    console.log('Waiting 10 seconds before attempting to reconnect...');
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    
+    // Try to reconnect
+    console.log('Attempting to reinitialize after disconnection...');
+    try {
+        await client.initialize();
+        console.log('Client reinitialized successfully after disconnection');
+    } catch (error) {
+        console.error('Failed to reinitialize after disconnection:', error.message);
+        console.log('Will try again via the connection monitor');
+    }
 });
 
 // Help Text
@@ -309,152 +411,175 @@ client.on('auth_failure', msg => {
 
 // Message Handler
 client.on('message', async msg => {
-    console.log(`Message received: ${new Date().toISOString()}`, {
-        from: msg.from,
-        type: msg.hasMedia ? 'media' : 'text'
-    });
-
-    if (msg.from.endsWith('@g.us')) return;
-
-    // Verification command handling
-    if (msg.body?.startsWith('#verify')) {
-        const code = msg.body.split(' ')[1];
-        const user = await User.findOne({ uniqueCode: code });
-        
-        if (user) {
-            user.whatsappNumber = msg.from;
-            user.isVerified = true;
-            await user.save();
-            await safeSendReply(msg, 'Verification successful! Send #help to see available commands.');
-        } else {
-            await safeSendReply(msg, 'Invalid code. Please check your code and try again.');
-        }
-        return;
-    }
-
-    // Check user verification
-    const user = await User.findOne({ whatsappNumber: msg.from, isVerified: true });
-    if (!user) return;
-
     try {
-                // Handle media messages
-                if (msg.hasMedia) {
-                    try {
-                        const media = await msg.downloadMedia();
-                        const fileBuffer = Buffer.from(media.data, 'base64');
-                        
-                        if (fileBuffer.length > MAX_FILE_SIZE) {
-                            await safeSendReply(msg, 'File too large. Please send a smaller file.');
-                            return;
-                        }
-                        
-                        let analysis;
-                        if (media.mimetype.includes('image') || media.mimetype.includes('pdf')) {
-                            await safeSendReply(msg, 'Analyzing your content...');
-                            analysis = await analyzeContent(fileBuffer, media.mimetype, media.filename);
-                        } else {
-                            analysis = {
-                                category: media.mimetype.includes('video') ? 'video' : 'others',
-                                keywords: [],
-                                subject: null,
-                                date: null
-                            };
-                        }
-        
-                        const category = analysis.category.toLowerCase();
-                        const fileName = `${category}_${Date.now()}${path.extname(media.filename || '.file')}`;
-                        const mediaUrl = await uploadToGCS(fileBuffer, fileName, media.mimetype);
-        
-                        await Media.create({
-                            userId: user._id,
-                            category: category,
-                            mediaUrl: mediaUrl,
-                            type: media.mimetype,
-                            fileSize: fileBuffer.length,
-                            keywords: analysis.keywords || [],
-                            metadata: {
-                                subject: analysis.subject,
-                                eventDate: parseDate(analysis.date),
-                                contentType: media.mimetype
-                            },
-                            timestamp: new Date()
-                        });
-        
-                        const shortUrl = await shortenUrl(mediaUrl);
-                        let response = `File analyzed and uploaded as ${category}!`;
-                        if (analysis.keywords?.length > 0) {
-                            response += `\nKeywords: ${analysis.keywords.join(', ')}`;
-                        }
-                        if (analysis.subject) {
-                            response += `\nSubject: ${analysis.subject}`;
-                        }
-                        response += `\nAccess it here: ${shortUrl}`;
-                        
-                        await safeSendReply(msg, response);
-                    } catch (mediaError) {
-                        console.error('Media handling error:', mediaError);
-                        await safeSendReply(msg, 'Error processing media. Please try again.');
-                    }
-                    return;
-                }
-                        // Handle links
-        if (msg.body?.match(/(https?:\/\/[^\s]+)/g)) {
-            const links = msg.body.match(/(https?:\/\/[^\s]+)/g);
-            
-            for (const link of links) {
-                await Media.create({
-                    userId: user._id,
-                    category: 'link',
-                    mediaUrl: link,
-                    type: 'link',
-                    fileSize: 0,
-                    keywords: [],
-                    metadata: {
-                        subject: null,
-                        eventDate: null,
-                        contentType: 'link'
-                    },
-                    timestamp: new Date()
-                });
-            }
-            
-            await safeSendReply(msg, `${links.length} link(s) saved successfully!`);
+        console.log(`Message received: ${new Date().toISOString()}`, {
+            from: msg.from,
+            body: msg.body ? msg.body.substring(0, 20) + (msg.body.length > 20 ? '...' : '') : '[no text]',
+            type: msg.hasMedia ? 'media' : 'text',
+            timestamp: msg._data.t
+        });
+
+        if (msg.from.endsWith('@g.us')) {
+            console.log('Ignoring group message');
             return;
         }
 
-        // Handle commands
-        switch(true) {
-            case msg.body === '#categories':
-                const files = await Media.find({ userId: user._id });
-                const categories = {};
-                files.forEach(file => {
-                    categories[file.category] = (categories[file.category] || 0) + 1;
-                });
-                
-                let categoryResponse = '📊 Available Categories:\n\n';
-                for (const [category, count] of Object.entries(categories)) {
-                    categoryResponse += `${category}: ${count} files\n`;
-                }
-                await safeSendReply(msg, categoryResponse);
-                break;
-
-            case msg.body === '#help':
-                await safeSendReply(msg, helpText);
-                break;
-
-            case msg.body?.startsWith('#files'):
-                await handleFileRetrieval(msg, user);
-                break;
-
-            case msg.body?.startsWith('#search'):
-                await handleSearch(msg, user);
-                break;
-
-            case msg.body?.startsWith('#') && !['#help', '#verify', '#search', '#files'].includes(msg.body.split(' ')[0]):
-                await handleCategoryRetrieval(msg, user);
-                break;
+        // Verification command handling
+        if (msg.body?.startsWith('#verify')) {
+            console.log('Processing verification request');
+            const code = msg.body.split(' ')[1];
+            const user = await User.findOne({ uniqueCode: code });
+            
+            if (user) {
+                console.log(`User found for verification: ${user.email}`);
+                user.whatsappNumber = msg.from;
+                user.isVerified = true;
+                await user.save();
+                await safeSendReply(msg, 'Verification successful! Send #help to see available commands.');
+                console.log(`User ${user.email} verified successfully`);
+            } else {
+                console.log(`Invalid verification code: ${code}`);
+                await safeSendReply(msg, 'Invalid code. Please check your code and try again.');
+            }
+            return;
         }
 
+        // Check user verification
+        const user = await User.findOne({ whatsappNumber: msg.from, isVerified: true });
+        if (!user) {
+            console.log(`Unverified user or number not found: ${msg.from}`);
+            if (msg.body && !msg.body.startsWith('#')) {
+                // If it's a regular message and not a command, send a hint
+                await safeSendReply(msg, 'Please verify your account first. Use the #verify command followed by your unique code.');
+            }
+            return;
+        }
+
+        console.log(`Processing message from verified user: ${user.email}`);
+
+        try {
+            // Handle media messages
+            if (msg.hasMedia) {
+                try {
+                    const media = await msg.downloadMedia();
+                    const fileBuffer = Buffer.from(media.data, 'base64');
+                    
+                    if (fileBuffer.length > MAX_FILE_SIZE) {
+                        await safeSendReply(msg, 'File too large. Please send a smaller file.');
+                        return;
+                    }
+                    
+                    let analysis;
+                    if (media.mimetype.includes('image') || media.mimetype.includes('pdf')) {
+                        await safeSendReply(msg, 'Analyzing your content...');
+                        analysis = await analyzeContent(fileBuffer, media.mimetype, media.filename);
+                    } else {
+                        analysis = {
+                            category: media.mimetype.includes('video') ? 'video' : 'others',
+                            keywords: [],
+                            subject: null,
+                            date: null
+                        };
+                    }
+            
+                    const category = analysis.category.toLowerCase();
+                    const fileName = `${category}_${Date.now()}${path.extname(media.filename || '.file')}`;
+                    const mediaUrl = await uploadToGCS(fileBuffer, fileName, media.mimetype);
+            
+                    await Media.create({
+                        userId: user._id,
+                        category: category,
+                        mediaUrl: mediaUrl,
+                        type: media.mimetype,
+                        fileSize: fileBuffer.length,
+                        keywords: analysis.keywords || [],
+                        metadata: {
+                            subject: analysis.subject,
+                            eventDate: parseDate(analysis.date),
+                            contentType: media.mimetype
+                        },
+                        timestamp: new Date()
+                    });
+            
+                    const shortUrl = await shortenUrl(mediaUrl);
+                    let response = `File analyzed and uploaded as ${category}!`;
+                    if (analysis.keywords?.length > 0) {
+                        response += `\nKeywords: ${analysis.keywords.join(', ')}`;
+                    }
+                    if (analysis.subject) {
+                        response += `\nSubject: ${analysis.subject}`;
+                    }
+                    response += `\nAccess it here: ${shortUrl}`;
+                    
+                    await safeSendReply(msg, response);
+                } catch (mediaError) {
+                    console.error('Media handling error:', mediaError);
+                    await safeSendReply(msg, 'Error processing media. Please try again.');
+                }
+                return;
+            }
+                    // Handle links
+            if (msg.body?.match(/(https?:\/\/[^\s]+)/g)) {
+                const links = msg.body.match(/(https?:\/\/[^\s]+)/g);
+                
+                for (const link of links) {
+                    await Media.create({
+                        userId: user._id,
+                        category: 'link',
+                        mediaUrl: link,
+                        type: 'link',
+                        fileSize: 0,
+                        keywords: [],
+                        metadata: {
+                            subject: null,
+                            eventDate: null,
+                            contentType: 'link'
+                        },
+                        timestamp: new Date()
+                    });
+                }
+                
+                await safeSendReply(msg, `${links.length} link(s) saved successfully!`);
+                return;
+            }
+
+            // Handle commands
+            switch(true) {
+                case msg.body === '#categories':
+                    const files = await Media.find({ userId: user._id });
+                    const categories = {};
+                    files.forEach(file => {
+                        categories[file.category] = (categories[file.category] || 0) + 1;
+                    });
+                    
+                    let categoryResponse = '📊 Available Categories:\n\n';
+                    for (const [category, count] of Object.entries(categories)) {
+                        categoryResponse += `${category}: ${count} files\n`;
+                    }
+                    await safeSendReply(msg, categoryResponse);
+                    break;
+
+                case msg.body === '#help':
+                    await safeSendReply(msg, helpText);
+                    break;
+
+                case msg.body?.startsWith('#files'):
+                    await handleFileRetrieval(msg, user);
+                    break;
+
+                case msg.body?.startsWith('#search'):
+                    await handleSearch(msg, user);
+                    break;
+
+                case msg.body?.startsWith('#') && !['#help', '#verify', '#search', '#files'].includes(msg.body.split(' ')[0]):
+                    await handleCategoryRetrieval(msg, user);
+                    break;
+            }
+
+        } catch (error) {
+            console.error('Error:', error);
+            await safeSendReply(msg, 'Sorry, there was an error processing your message.');
+        }
     } catch (error) {
         console.error('Error:', error);
         await safeSendReply(msg, 'Sorry, there was an error processing your message.');
