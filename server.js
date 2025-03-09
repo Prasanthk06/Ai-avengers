@@ -8,7 +8,6 @@ const bcrypt = require('bcrypt');
 const { User, Media } = require('./database');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
-const FileStore = require('session-file-store')(session);
 
 const app = express();
 app.set('view engine','ejs')
@@ -20,18 +19,10 @@ connectDB();
 // Add session handling
 
 app.use(session({
-    store: new FileStore({
-        path: path.join(process.cwd(), 'sessions'),
-        ttl: 86400, // 1 day
-        retries: 0,
-        logFn: function(){},  // Silence logs
-        reapInterval: 3600    // Delete expired sessions hourly
-    }),
     secret: process.env.SESSION_SECRET || 'abcdefghijklmnopq',
     resave: false,
     saveUninitialized: false,
     cookie: {
-        // Only use secure cookies if not in development and if using HTTPS
         secure: false,
         maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
         httpOnly: true,
@@ -45,6 +36,19 @@ const transporter = nodemailer.createTransport({
         user: process.env.EMAIL,
         pass: process.env.EMAIL_PASSWORD
     }
+});
+
+// Add a cleanup middleware to reduce memory leaks
+app.use((req, res, next) => {
+    // Clean up expired sessions from memory store every 100 requests
+    if (Math.random() < 0.01) { // 1% chance on each request
+        console.log('Running session store cleanup');
+        // The memory store doesn't have a built-in cleanup, but we can nudge garbage collection
+        if (global.gc) {
+            global.gc();
+        }
+    }
+    next();
 });
 
 // Basic routes
@@ -131,63 +135,87 @@ app.get('/admin/whatsapp', requireAdmin, (req, res) => {
     });
 });
 
-// Restart WhatsApp connection (for admin use)
-app.post('/admin/whatsapp/restart', requireAdmin, async (req, res) => {
+// Add this utility function at an appropriate place (before the routes)
+const safeClientOperation = async (res, operation) => {
     try {
-        // Clear the QR timestamp so we know we need a new one
-        global.lastQrTimestamp = null;
-        
-        // Destroy the current client
-        await client.destroy();
-        console.log('WhatsApp client destroyed, reinitializing...');
-        
-        // Wait a moment before reinitializing
-        setTimeout(() => {
-            // Initialize client with forceNewSession option
-            client.initialize();
-            console.log('WhatsApp client restarting...');
-            
-            res.json({ 
-                success: true, 
-                message: 'WhatsApp client restarting. Please wait 15-20 seconds for a new QR code to appear, then refresh the page.' 
-            });
-        }, 1000);
+        await operation();
     } catch (error) {
-        console.error('Error restarting WhatsApp client:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to restart WhatsApp client: ' + error.message 
-        });
+        console.error('WhatsApp client operation error:', error);
+        // Avoid hanging the response
+        if (!res.headersSent) {
+            res.status(500).json({
+                success: false,
+                message: 'An error occurred with the WhatsApp client: ' + error.message
+            });
+        }
     }
+};
+
+// Modify the /admin/whatsapp/restart route (if it exists)
+app.post('/admin/whatsapp/restart', requireAdmin, (req, res) => {
+    console.log('Admin requested WhatsApp client restart');
+    
+    // Send response immediately to prevent timeouts
+    res.json({
+        success: true,
+        message: 'WhatsApp client restart initiated. This may take a minute to complete.'
+    });
+    
+    // Run the operation asynchronously
+    safeClientOperation(res, async () => {
+        try {
+            await client.destroy();
+            console.log('Client destroyed, waiting before restarting...');
+            
+            // Wait before restarting
+            await new Promise(r => setTimeout(r, 5000));
+            
+            await client.initialize();
+            console.log('Client restarted successfully');
+        } catch (error) {
+            console.error('Error during client restart:', error);
+            // No need to send response here as we already sent it
+        }
+    });
 });
 
-// Add this route after the existing /admin/whatsapp/restart route
-app.post('/admin/whatsapp/regenerate-qr', requireAdmin, async (req, res) => {
-    try {
-        // Make sure the public directory exists
-        const publicDir = path.join(__dirname, 'public');
-        if (!fs.existsSync(publicDir)) {
-            fs.mkdirSync(publicDir, { recursive: true });
+// Modify the /admin/whatsapp/regenerate-qr route (if it exists)
+app.post('/admin/whatsapp/regenerate-qr', requireAdmin, (req, res) => {
+    console.log('Admin requested QR code regeneration');
+    
+    // Send response immediately
+    res.json({
+        success: true,
+        message: 'QR regeneration initiated. This may take a minute to complete.'
+    });
+    
+    // Run the operation asynchronously
+    safeClientOperation(res, async () => {
+        try {
+            if (client.pupBrowser) {
+                await client.destroy();
+                console.log('Client destroyed, waiting before regenerating QR...');
+                
+                await new Promise(r => setTimeout(r, 5000));
+                
+                // Reset any QR throttling
+                if (typeof client.lastQrGeneration !== 'undefined') {
+                    client.lastQrGeneration = 0;
+                }
+                if (typeof client.qrRegenerationCount !== 'undefined') {
+                    client.qrRegenerationCount = 0; 
+                }
+                
+                await client.initialize();
+                console.log('Client reinitialized, QR should be generated');
+            } else {
+                console.log('Client not initialized, starting initialization');
+                await client.initialize();
+            }
+        } catch (error) {
+            console.error('Error during QR regeneration:', error);
         }
-        
-        // Force disconnect and reinitialize
-        await client.destroy();
-        console.log('WhatsApp client destroyed, reinitializing...');
-        
-        setTimeout(() => {
-            client.initialize();
-            res.json({ 
-                success: true, 
-                message: 'WhatsApp client restarting. Please wait 10-15 seconds for a new QR code to appear.' 
-            });
-        }, 1000);
-    } catch (error) {
-        console.error('Error regenerating QR:', error);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Failed to regenerate QR code: ' + error.message 
-        });
-    }
+    });
 });
 
 // WhatsApp connection troubleshooting route

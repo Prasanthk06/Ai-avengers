@@ -163,39 +163,32 @@ const client = new Client({
             '--disable-setuid-sandbox',
             '--disable-gpu',
             '--disable-dev-shm-usage',
-            '--disable-web-security',
-            '--aggressive-cache-discard',
-            '--disable-features=IsolateOrigins',
-            '--disable-site-isolation-trials',
-            '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
             '--disable-extensions',
-            '--disable-background-networking',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-breakpad',
-            '--disable-component-extensions-with-background-pages',
-            '--disable-hang-monitor',
-            '--disable-ipc-flooding-protection'
+            '--disable-browser-side-navigation',
+            '--disable-accelerated-2d-canvas',
+            '--disable-features=site-per-process,TranslateUI',
+            '--disable-ipc-flooding-protection',
+            '--disable-renderer-backgrounding',
+            '--disable-infobars'
         ],
+        ignoreHTTPSErrors: true,
         defaultViewport: null,
-        timeout: 60000, // Increase timeout to 60 seconds
+        timeout: 120000, // Increase timeout to 2 minutes
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
     },
     queueMessages: true,
     takeoverOnConflict: false, // Change to false to prevent takeover conflicts
     takeoverTimeoutMs: 30000,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    ffmpegPath: null, // Ensure this is null to prevent audio/video processing issues
     webVersionCache: {
         type: 'remote',
         remotePath: 'https://web.whatsapp.com', // Use official URL
     },
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     disableReconnect: false,
     bypassCSP: true,
-    webVersion: '2.2346.52', // Set a specific web version to avoid compatibility issues
-    restartOnCrash: true,
+    restartOnCrash: true
 });
 
 // Keep-alive strategy
@@ -757,44 +750,77 @@ async function formatSearchResponse(files, keyword) {
     return response;
 }
 
-// Add this helper function to safely perform operations on the Puppeteer page
+// If safePageOperation doesn't exist, add this function, otherwise update it
 async function safePageOperation(operation, fallbackValue = null) {
     try {
-        // Check if the page is available and not closed before operation
-        if (!client.pupPage || client.pupPage.isClosed()) {
-            console.log('Page is closed or not available, cannot perform operation');
+        // Check if client is initialized
+        if (!client.pupBrowser || !client.pupPage) {
+            console.log('[SafeOperation] Browser/Page not available');
             return fallbackValue;
         }
         
-        return await operation();
-    } catch (error) {
-        if (error.message.includes('Target closed') || 
-            error.message.includes('Protocol error') ||
-            error.message.includes('Session closed')) {
-            console.log('Browser target closed or session error:', error.message);
-            // Reset page reference to avoid further attempts on closed page
-            if (client.pupPage) {
-                try {
-                    client.pupPage = null;
-                } catch (e) {
-                    // Ignore errors when resetting page
-                }
+        // Check if page is closed
+        try {
+            const closed = client.pupPage.isClosed();
+            if (closed) {
+                console.log('[SafeOperation] Page is closed');
+                return fallbackValue;
             }
+        } catch (checkError) {
+            console.log('[SafeOperation] Error checking page state:', checkError.message);
             return fallbackValue;
         }
         
-        // For other errors, propagate them
-        throw error;
+        // Execute the actual operation with timeout for safety
+        return await Promise.race([
+            operation(),
+            new Promise((resolve) => setTimeout(() => {
+                console.log('[SafeOperation] Operation timed out');
+                resolve(fallbackValue);
+            }, 10000)) // 10 second timeout
+        ]);
+    } catch (error) {
+        // Handle specific errors
+        if (error.message && (
+            error.message.includes('Target closed') || 
+            error.message.includes('Protocol error') ||
+            error.message.includes('Session closed') ||
+            error.message.includes('Target page, context or browser has been closed')
+        )) {
+            console.log('[SafeOperation] Browser target error:', error.message);
+            
+            // Mark client for reconnection if needed
+            if (!isReconnecting) {
+                console.log('[SafeOperation] Scheduling reconnection due to closed target');
+                setTimeout(() => attemptReconnect(), 10000);
+            }
+            
+            return fallbackValue;
+        }
+        
+        // Other errors
+        console.error('[SafeOperation] Operation error:', error);
+        return fallbackValue;
     }
 }
 
-// Modify the getState method to use the safe operation helper
-const originalGetState = client.getState;
-client.getState = async function() {
-    return safePageOperation(async () => {
-        return await originalGetState.call(client);
-    }, 'DISCONNECTED'); // Return DISCONNECTED as fallback if operation fails
-};
+// Patch WhatsApp client methods that often cause Target closed errors
+function patchClientMethods() {
+    // Store original methods
+    const originalGetState = client.getState;
+    
+    // Replace with safe versions
+    client.getState = async function() {
+        return safePageOperation(async () => {
+            return await originalGetState.call(client);
+        }, 'DISCONNECTED');
+    };
+
+    console.log('[Patch] Client methods patched for safe operation');
+}
+
+// Call the patch function during startup
+patchClientMethods();
 
 client.initialize();
 
