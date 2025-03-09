@@ -7,9 +7,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { User, Media } = require('./database');
 const nodemailer = require('nodemailer');
-
-
-
+const fs = require('fs');
 
 const app = express();
 app.set('view engine','ejs')
@@ -48,6 +46,127 @@ const requireAuth = (req, res, next) => {
     next();
 };
 
+// Admin route middleware
+const requireAdmin = (req, res, next) => {
+    if (!req.session.userId) {
+        return res.redirect('/login');
+    }
+    
+    User.findById(req.session.userId)
+        .then(user => {
+            if (!user || !user.isAdmin) {
+                return res.status(403).send('Access denied');
+            }
+            next();
+        })
+        .catch(err => {
+            console.error('Admin check error:', err);
+            res.status(500).send('Server error');
+        });
+};
+
+// WhatsApp connection status route
+app.get('/whatsapp-status', requireAdmin, (req, res) => {
+    // Check current time to ensure fresh status
+    const now = new Date();
+    
+    // Build status response object
+    const status = {
+        isAuthenticated: client.info ? true : false,
+        info: client.info || null,
+        lastQrTimestamp: global.lastQrTimestamp || null,
+        qrAvailable: global.lastQrTimestamp ? true : false,
+        timestamp: now.toISOString() // Add timestamp for debugging
+    };
+    
+    // Check if QR code file exists and get its stats
+    const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+    try {
+        if (fs.existsSync(qrPath)) {
+            const stats = fs.statSync(qrPath);
+            status.qrFileExists = true;
+            status.qrFileSize = stats.size;
+            status.qrFileTime = stats.mtime.toISOString();
+        } else {
+            status.qrFileExists = false;
+        }
+    } catch (error) {
+        console.error('Error checking QR file:', error);
+        status.qrFileExists = false;
+        status.qrFileError = error.message;
+    }
+    
+    // If QR timestamp exists but file doesn't, we don't reset the timestamp
+    // anymore to avoid race conditions with QR generation
+    
+    res.json(status);
+});
+
+// WhatsApp QR code admin page
+app.get('/admin/whatsapp', requireAdmin, (req, res) => {
+    res.render('whatsapp-admin', { 
+        lastQrTimestamp: global.lastQrTimestamp || null
+    });
+});
+
+// Restart WhatsApp connection (for admin use)
+app.post('/admin/whatsapp/restart', requireAdmin, async (req, res) => {
+    try {
+        // Clear the QR timestamp so we know we need a new one
+        global.lastQrTimestamp = null;
+        
+        // Destroy the current client
+        await client.destroy();
+        console.log('WhatsApp client destroyed, reinitializing...');
+        
+        // Wait a moment before reinitializing
+        setTimeout(() => {
+            // Initialize client with forceNewSession option
+            client.initialize();
+            console.log('WhatsApp client restarting...');
+            
+            res.json({ 
+                success: true, 
+                message: 'WhatsApp client restarting. Please wait 15-20 seconds for a new QR code to appear, then refresh the page.' 
+            });
+        }, 1000);
+    } catch (error) {
+        console.error('Error restarting WhatsApp client:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Failed to restart WhatsApp client: ' + error.message 
+        });
+    }
+});
+
+// Add this route after the existing /admin/whatsapp/restart route
+app.post('/admin/whatsapp/regenerate-qr', requireAdmin, async (req, res) => {
+    try {
+        // Make sure the public directory exists
+        const publicDir = path.join(__dirname, 'public');
+        if (!fs.existsSync(publicDir)) {
+            fs.mkdirSync(publicDir, { recursive: true });
+        }
+        
+        // Force disconnect and reinitialize
+        await client.destroy();
+        console.log('WhatsApp client destroyed, reinitializing...');
+        
+        setTimeout(() => {
+            client.initialize();
+            res.json({ 
+                success: true, 
+                message: 'WhatsApp client restarting. Please wait 10-15 seconds for a new QR code to appear.' 
+            });
+        }, 1000);
+    } catch (error) {
+        console.error('Error regenerating QR:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Failed to regenerate QR code: ' + error.message 
+        });
+    }
+});
 
 app.get('/', (req, res) => {
     res.render('landing');

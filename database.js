@@ -7,7 +7,8 @@ const userSchema = new mongoose.Schema({
     email: String,
     whatsappNumber: String,
     uniqueCode: String,
-    isVerified: { type: Boolean, default: false }
+    isVerified: { type: Boolean, default: false },
+    isAdmin: { type: Boolean, default: false }
 });
 
 // Create a simple media schema

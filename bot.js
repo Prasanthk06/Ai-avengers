@@ -5,12 +5,19 @@ const { Storage } = require('@google-cloud/storage');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
 const path = require('path');
+const fs = require('fs');
+const fsPromises = require('fs').promises;
+const qr = require('qr-image');
 require('dotenv').config();
 
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Constants
+const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB limit
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const AUTH_FOLDER_PATH = path.join(process.cwd(), '.wwebjs_auth');
+const CACHE_FOLDER_PATH = path.join(process.cwd(), '.wwebjs_cache');
 
-// Initialize Google Cloud Storage
+// Initialize Gemini and Storage
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const storage = new Storage({
     projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
     credentials: {
@@ -18,23 +25,61 @@ const storage = new Storage({
         private_key: process.env.GOOGLE_CLOUD_PRIVATE_KEY
     }
 });
-
 const bucket = storage.bucket(process.env.GOOGLE_CLOUD_BUCKET_NAME);
 
-// Gemini content analysis function
+// Ensure auth and cache directories exist
+function ensureDirectoriesExist() {
+    if (!fs.existsSync(AUTH_FOLDER_PATH)) {
+        fs.mkdirSync(AUTH_FOLDER_PATH, { recursive: true });
+    }
+    
+    if (!fs.existsSync(CACHE_FOLDER_PATH)) {
+        fs.mkdirSync(CACHE_FOLDER_PATH, { recursive: true });
+    }
+}
+
+// Cache Management
+async function manageCache() {
+    try {
+        ensureDirectoriesExist();
+        const authPath = AUTH_FOLDER_PATH;
+        const files = await fsPromises.readdir(authPath);
+        const sessionFiles = files.filter(file => !file.includes('session'));
+        for (const file of sessionFiles) {
+            await fsPromises.unlink(path.join(authPath, file));
+        }
+        console.log('Cache cleaned:', new Date().toISOString());
+    } catch (error) {
+        console.log('Cache cleanup:', error.message);
+        // Continue execution even if cache cleaning fails
+    }
+}
+
+// Run cache cleanup every 10 minutes
+setInterval(manageCache, 10 * 60 * 1000);
+// Helper Functions
+async function safeSendReply(msg, content) {
+    try {
+        return await msg.reply(content);
+    } catch (error) {
+        console.log('Primary sending method failed:', error.message);
+        try {
+            return await client.sendMessage(msg.from, content);
+        } catch (sendError) {
+            console.log('Fallback sending failed:', sendError.message);
+        }
+    }
+}
+
 async function analyzeContent(fileBuffer, mimeType, filename) {
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-   
     const prompt = "Analyze this content and return a JSON object with these fields: category (one of: poster, exam, notes, assignment, event), keywords (array of strings), subject (string or null), date (string or null)";
-   
-    const imageParts = [
-        {
-            inlineData: {
-                data: fileBuffer.toString('base64'),
-                mimeType: mimeType
-            },
+    const imageParts = [{
+        inlineData: {
+            data: fileBuffer.toString('base64'),
+            mimeType: mimeType
         },
-    ];
+    }];
 
     try {
         const result = await model.generateContent([prompt, ...imageParts]);
@@ -43,7 +88,6 @@ async function analyzeContent(fileBuffer, mimeType, filename) {
         return JSON.parse(cleanedResponse);
     } catch (error) {
         console.error('Gemini analysis error:', error);
-        // Fallback with default categorization
         return {
             category: mimeType.includes('image') ? 'poster' :
                      mimeType.includes('pdf') ? 'exam' :
@@ -55,33 +99,10 @@ async function analyzeContent(fileBuffer, mimeType, filename) {
     }
 }
 
-function parseDate(dateString) {
-    if (!dateString) return null;
-   
-    try {
-        // Handle different date formats
-        if (dateString.includes('/')) {
-            const [day, month, year] = dateString.split('/');
-            const fullYear = year.length === 2 ? '20' + year : year;
-            const date = new Date(`${fullYear}-${month}-${day}`);
-            return date.getTime() ? date : null;
-        }
-       
-        // Try parsing as a regular date string
-        const date = new Date(dateString);
-        return date.getTime() ? date : null;
-    } catch {
-        return null;
-    }
-}
-
-// Helper function to upload file to Google Cloud Storage
 async function uploadToGCS(fileBuffer, fileName, mimeType) {
     const file = bucket.file(fileName);
     const stream = file.createWriteStream({
-        metadata: {
-            contentType: mimeType
-        },
+        metadata: { contentType: mimeType },
         resumable: false
     });
 
@@ -96,7 +117,6 @@ async function uploadToGCS(fileBuffer, fileName, mimeType) {
     });
 }
 
-// URL Shortener Function
 async function shortenUrl(url) {
     try {
         const response = await axios.get(`http://tinyurl.com/api-create.php?url=${url}`);
@@ -107,32 +127,94 @@ async function shortenUrl(url) {
     }
 }
 
-// Create WhatsApp client with session persistence
+function parseDate(dateString) {
+    if (!dateString) return null;
+    try {
+        if (dateString.includes('/')) {
+            const [day, month, year] = dateString.split('/');
+            const fullYear = year.length === 2 ? '20' + year : year;
+            const date = new Date(`${fullYear}-${month}-${day}`);
+            return date.getTime() ? date : null;
+        }
+        const date = new Date(dateString);
+        return date.getTime() ? date : null;
+    } catch {
+        return null;
+    }
+}
+// Client Configuration
+// Call function to ensure directories exist before initializing client
+ensureDirectoriesExist();
+
 const client = new Client({
     authStrategy: new LocalAuth({
-        clientId: "client-one" // You can specify a unique ID for the session
-    })
+        clientId: "client-one",
+        dataPath: AUTH_FOLDER_PATH
+    }),
+    puppeteer: {
+        headless: IS_PRODUCTION ? 'new' : false,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-web-security',
+            '--aggressive-cache-discard',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-site-isolation-trials',
+            '--single-process', // Added for better Railway compatibility
+            '--use-gl=egl' // Helps with some cloud environments
+        ],
+        defaultViewport: null,
+        timeout: 0
+    },
+    queueMessages: true, // Changed to true for better retry handling
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 10000, // Increased timeout
+    restartOnAuthFail: true, // Added to auto restart on auth failures
 });
 
-// Generate QR Code
-client.on('qr', qr => {
-    qrcode.generate(qr, {small: true});
-    console.log('QR Code generated! Scan it with your WhatsApp');
-});
+// Connection monitoring with improved error handling
+let connectionCheckInterval;
+let qrRetryTimeout; // To track QR retry timeout
+let isReconnecting = false;
 
-// When client is ready
+// Add a reconnect function that can be called when connection issues occur
+async function attemptReconnect() {
+    if (isReconnecting) return;
+    
+    isReconnecting = true;
+    console.log('Attempting to reconnect WhatsApp client...');
+    
+    try {
+        await client.destroy();
+        console.log('Client destroyed, initializing new instance...');
+        
+        // Short delay before reinitialization
+        await new Promise(r => setTimeout(r, 3000));
+        
+        await client.initialize();
+        console.log('Client reinitialized successfully');
+    } catch (error) {
+        console.log('Reconnection attempt failed:', error.message);
+    } finally {
+        isReconnecting = false;
+    }
+}
+
 client.on('ready', () => {
     console.log('Client is ready!');
+    connectionCheckInterval = setInterval(() => {
+        if (!client.pupPage?.isClosed()) {
+            console.log('Connection active:', new Date().toISOString());
+        }
+    }, 30000);
 });
 
-// Log authentication success
-client.on('authenticated', () => {
-    console.log('Authenticated successfully');
-});
-
-// Log authentication failure
-client.on('auth_failure', msg => {
-    console.error('Authentication failure:', msg);
+client.on('disconnected', async (reason) => {
+    console.log('Client disconnected:', reason);
+    clearInterval(connectionCheckInterval);
+    await client.initialize();
 });
 
 // Help Text
@@ -158,94 +240,167 @@ Available Commands:
 - Large files will be shared as links
 - Use #help anytime to see this menu
 `;
+// Event Handlers
+client.on('qr', async (qr) => {
+    // Clear any existing QR retry timeout
+    if (qrRetryTimeout) {
+        clearTimeout(qrRetryTimeout);
+    }
+    
+    // Generate terminal QR for development
+    qrcode.generate(qr, {small: true});
+    console.log('QR Code generated! Scan it with your WhatsApp');
+    
+    // Save QR as image file for admin dashboard
+    try {
+        // Make sure the public directory exists
+        const publicDir = path.join(process.cwd(), 'public');
+        if (!fs.existsSync(publicDir)) {
+            fs.mkdirSync(publicDir, { recursive: true });
+        }
+        
+        // Generate QR code as PNG using qr-image module
+        const qrCode = require('qr-image');
+        const qrImg = qrCode.image(qr, { type: 'png' });
+        const qrPath = path.join(publicDir, 'latest-qr.png');
+        
+        // Create write stream and save file
+        const qrStream = fs.createWriteStream(qrPath);
+        qrImg.pipe(qrStream);
+        
+        // Handle stream events to ensure file is properly written
+        qrStream.on('finish', () => {
+            // Set global variable for admin panel
+            global.lastQrTimestamp = new Date().toISOString();
+            console.log(`QR Code saved to ${qrPath} at ${global.lastQrTimestamp}`);
+            
+            // Set a timeout to regenerate QR if not scanned in 40 seconds
+            qrRetryTimeout = setTimeout(() => {
+                console.log('QR code expired, will generate a new one when requested');
+            }, 40000);
+        });
+        
+        qrStream.on('error', (err) => {
+            console.error('Error writing QR file:', err);
+        });
+    } catch (error) {
+        console.error('Error saving QR code:', error);
+    }
+});
 
-// Handle incoming messages
+client.on('authenticated', () => {
+    console.log('Authenticated successfully');
+    
+    // Don't clear the QR code immediately after authentication
+    // This gives admins time to see the current state transition
+    setTimeout(() => {
+        // Only clear if the client is still authenticated
+        if (client.info) {
+            console.log('Authentication confirmed, clearing QR code state');
+            // Optionally clear QR timestamp after confirmed connection
+            // global.lastQrTimestamp = null;
+        }
+    }, 10000);
+});
+
+client.on('auth_failure', msg => {
+    console.error('Authentication failure:', msg);
+});
+
+// Message Handler
 client.on('message', async msg => {
-    const receivedTime = new Date();
-    console.log(`Message received at ${receivedTime.toISOString()}:`, {
+    console.log(`Message received: ${new Date().toISOString()}`, {
         from: msg.from,
-        body: msg.body,
-        hasMedia: msg.hasMedia
+        type: msg.hasMedia ? 'media' : 'text'
     });
 
+    if (msg.from.endsWith('@g.us')) return;
+
+    // Verification command handling
+    if (msg.body?.startsWith('#verify')) {
+        const code = msg.body.split(' ')[1];
+        const user = await User.findOne({ uniqueCode: code });
+        
+        if (user) {
+            user.whatsappNumber = msg.from;
+            user.isVerified = true;
+            await user.save();
+            await safeSendReply(msg, 'Verification successful! Send #help to see available commands.');
+        } else {
+            await safeSendReply(msg, 'Invalid code. Please check your code and try again.');
+        }
+        return;
+    }
+
+    // Check user verification
+    const user = await User.findOne({ whatsappNumber: msg.from, isVerified: true });
+    if (!user) return;
+
     try {
-        // Handle verification command separately
-        if (msg.body.startsWith('#verify')) {
-            const code = msg.body.split(' ')[1];
-            const user = await User.findOne({ uniqueCode: code });
-           
-            if (user) {
-                user.whatsappNumber = msg.from;
-                user.isVerified = true;
-                await user.save();
-                msg.reply('Verification successful! Send #help to see available commands.');
-            } else {
-                msg.reply('Invalid code. Please check your code and try again.');
-            }
-            return;
-        }
-
-        // Check if user is verified
-        const user = await User.findOne({ whatsappNumber: msg.from, isVerified: true });
-        if (!user) {
-            msg.reply('Please verify your account first using #verify YOUR_CODE');
-            return;
-        }
-
-        // Handle media messages
-        if (msg.hasMedia) {
-            const media = await msg.downloadMedia();
-            const fileBuffer = Buffer.from(media.data, 'base64');
-           
-            let analysis;
-            if (media.mimetype.includes('image') || media.mimetype.includes('pdf')) {
-                msg.reply('Analyzing your content...');
-                analysis = await analyzeContent(fileBuffer, media.mimetype, media.filename);
-            } else {
-                analysis = {
-                    category: media.mimetype.includes('video') ? 'video' : 'others',
-                    keywords: [],
-                    subject: null,
-                    date: null
-                };
-            }
-           
-            const category = analysis.category.toLowerCase();
-            const fileName = `${category}_${Date.now()}${path.extname(media.filename || '.file')}`;
-            const mediaUrl = await uploadToGCS(fileBuffer, fileName, media.mimetype);
-
-            await Media.create({
-                userId: user._id,
-                category: category,
-                mediaUrl: mediaUrl,
-                type: media.mimetype,
-                fileSize: fileBuffer.length,
-                keywords: analysis.keywords || [],
-                metadata: {
-                    subject: analysis.subject,
-                    eventDate: parseDate(analysis.date),
-                    contentType: media.mimetype
-                },
-                timestamp: new Date()
-            });
-
-            const shortUrl = await shortenUrl(mediaUrl);
-            let response = `File analyzed and uploaded as ${category}!`;
-            if (analysis.keywords && analysis.keywords.length > 0) {
-                response += `\nKeywords: ${analysis.keywords.join(', ')}`;
-            }
-            if (analysis.subject) {
-                response += `\nSubject: ${analysis.subject}`;
-            }
-            response += `\nAccess it here: ${shortUrl}`;
-           
-            msg.reply(response);
-            return;
-        }
-
-        if (msg.body.match(/(https?:\/\/[^\s]+)/g)) {
+                // Handle media messages
+                if (msg.hasMedia) {
+                    try {
+                        const media = await msg.downloadMedia();
+                        const fileBuffer = Buffer.from(media.data, 'base64');
+                        
+                        if (fileBuffer.length > MAX_FILE_SIZE) {
+                            await safeSendReply(msg, 'File too large. Please send a smaller file.');
+                            return;
+                        }
+                        
+                        let analysis;
+                        if (media.mimetype.includes('image') || media.mimetype.includes('pdf')) {
+                            await safeSendReply(msg, 'Analyzing your content...');
+                            analysis = await analyzeContent(fileBuffer, media.mimetype, media.filename);
+                        } else {
+                            analysis = {
+                                category: media.mimetype.includes('video') ? 'video' : 'others',
+                                keywords: [],
+                                subject: null,
+                                date: null
+                            };
+                        }
+        
+                        const category = analysis.category.toLowerCase();
+                        const fileName = `${category}_${Date.now()}${path.extname(media.filename || '.file')}`;
+                        const mediaUrl = await uploadToGCS(fileBuffer, fileName, media.mimetype);
+        
+                        await Media.create({
+                            userId: user._id,
+                            category: category,
+                            mediaUrl: mediaUrl,
+                            type: media.mimetype,
+                            fileSize: fileBuffer.length,
+                            keywords: analysis.keywords || [],
+                            metadata: {
+                                subject: analysis.subject,
+                                eventDate: parseDate(analysis.date),
+                                contentType: media.mimetype
+                            },
+                            timestamp: new Date()
+                        });
+        
+                        const shortUrl = await shortenUrl(mediaUrl);
+                        let response = `File analyzed and uploaded as ${category}!`;
+                        if (analysis.keywords?.length > 0) {
+                            response += `\nKeywords: ${analysis.keywords.join(', ')}`;
+                        }
+                        if (analysis.subject) {
+                            response += `\nSubject: ${analysis.subject}`;
+                        }
+                        response += `\nAccess it here: ${shortUrl}`;
+                        
+                        await safeSendReply(msg, response);
+                    } catch (mediaError) {
+                        console.error('Media handling error:', mediaError);
+                        await safeSendReply(msg, 'Error processing media. Please try again.');
+                    }
+                    return;
+                }
+                        // Handle links
+        if (msg.body?.match(/(https?:\/\/[^\s]+)/g)) {
             const links = msg.body.match(/(https?:\/\/[^\s]+)/g);
-           
+            
             for (const link of links) {
                 await Media.create({
                     userId: user._id,
@@ -262,180 +417,157 @@ client.on('message', async msg => {
                     timestamp: new Date()
                 });
             }
-           
-            msg.reply(`${links.length} link(s) saved successfully!`);
+            
+            await safeSendReply(msg, `${links.length} link(s) saved successfully!`);
             return;
         }
 
         // Handle commands
-
-        if (msg.body === '#categories') {
-            const files = await Media.find({ userId: user._id });
-            const categories = {};
-           
-            files.forEach(file => {
-                categories[file.category] = (categories[file.category] || 0) + 1;
-            });
-       
-            let response = '📊 Available Categories:\n\n';
-            for (const [category, count] of Object.entries(categories)) {
-                response += `${category}: ${count} files\n`;
-            }
-           
-            msg.reply(response);
-            return;
-        }
-
-        if (msg.body === '#help') {
-            msg.reply(helpText);
-            return;
-        }
-
-        // File Retrieval Commands
-        if (msg.body.startsWith('#files')) {
-            const command = msg.body.split(' ');
-            let startDate, endDate;
-            const now = new Date();
-           
-            switch(command[1]) {
-                case 'today':
-                    startDate = new Date(now.setHours(0,0,0,0));
-                    endDate = new Date(now.setHours(23,59,59,999));
-                    break;
-                case 'yesterday':
-                    startDate = new Date(now);
-                    startDate.setDate(startDate.getDate() - 1);
-                    startDate.setHours(0,0,0,0);
-                    endDate = new Date(startDate);
-                    endDate.setHours(23,59,59,999);
-                    break;
-                case 'week':
-                    startDate = new Date(now);
-                    startDate.setDate(startDate.getDate() - 7);
-                    endDate = new Date(now);
-                    break;
-                default:
-                    msg.reply('Please specify: today, yesterday, or week');
-                    return;
-            }
-
-            const files = await Media.find({
-                userId: user._id,
-                timestamp: { $gte: startDate, $lte: endDate }
-            }).sort({ timestamp: -1 });
-
-            if (files.length === 0) {
-                msg.reply(`No files found for ${command[1]}`);
-                return;
-            }
-
-            let groupedFiles = {};
-            files.forEach(file => {
-                if (!groupedFiles[file.category]) {
-                    groupedFiles[file.category] = [];
+        switch(true) {
+            case msg.body === '#categories':
+                const files = await Media.find({ userId: user._id });
+                const categories = {};
+                files.forEach(file => {
+                    categories[file.category] = (categories[file.category] || 0) + 1;
+                });
+                
+                let categoryResponse = '📊 Available Categories:\n\n';
+                for (const [category, count] of Object.entries(categories)) {
+                    categoryResponse += `${category}: ${count} files\n`;
                 }
-                groupedFiles[file.category].push(file);
-            });
+                await safeSendReply(msg, categoryResponse);
+                break;
 
-            let response = `Files from ${command[1]}:\n\n`;
-           
-            for (const category in groupedFiles) {
-                response += `${category.toUpperCase()}:\n`;
-                for (let i = 0; i < groupedFiles[category].length; i++) {
-                    const file = groupedFiles[category][i];
-                    const shortUrl = await shortenUrl(file.mediaUrl);
-                    response += `${i + 1}. ${shortUrl}\n`;
-                    if (file.keywords && file.keywords.length > 0) {
-                        response += `   Keywords: ${file.keywords.join(', ')}\n`;
-                    }
-                }
-                response += '\n';
-            }
-           
-            msg.reply(response);
-            return;
-        }
+            case msg.body === '#help':
+                await safeSendReply(msg, helpText);
+                break;
 
-        // Category Retrieval
-        if (msg.body.startsWith('#') && msg.body.split(' ')[0] !== '#help' && msg.body.split(' ')[0] !== '#verify' && msg.body.split(' ')[0] !== '#search' && msg.body.split(' ')[0] !== '#files') {
-            const command = msg.body.split(' ');
-            const category = command[0].replace('#', '').slice(0, -1); // Remove 's' from end
-            const limit = parseInt(command[1]) || 5;
-       
-            if (limit <= 0) {
-                msg.reply('Please specify a valid number greater than 0');
-                return;
-            }
-       
-            const files = await Media.find({
-                userId: user._id,
-                category: category
-            })
-            .sort({ timestamp: -1 })
-            .limit(limit);
-       
-            if (files.length === 0) {
-                msg.reply(`No ${category} files found`);
-                return;
-            }
-       
-            let response = `Last ${limit} ${category} files:\n\n`;
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const shortUrl = await shortenUrl(file.mediaUrl);
-                response += `${i + 1}. ${shortUrl}\n`;
-                if (file.keywords && file.keywords.length > 0) {
-                    response += `   Keywords: ${file.keywords.join(', ')}\n`;
-                }
-            }
-           
-            msg.reply(response);
-            return;
-        }
+            case msg.body?.startsWith('#files'):
+                await handleFileRetrieval(msg, user);
+                break;
 
-        // Search Command
-        if (msg.body.startsWith('#search')) {
-            const keyword = msg.body.slice(8).trim().toLowerCase();
-            if (!keyword) {
-                msg.reply('Please provide a search keyword');
-                return;
-            }
+            case msg.body?.startsWith('#search'):
+                await handleSearch(msg, user);
+                break;
 
-            const files = await Media.find({
-                userId: user._id,
-                $or: [
-                    { keywords: { $regex: keyword, $options: 'i' } },
-                    { 'metadata.subject': { $regex: keyword, $options: 'i' } },
-                    { category: { $regex: keyword, $options: 'i' } }
-                ]
-            }).sort({ timestamp: -1 });
-
-            if (files.length === 0) {
-                msg.reply(`No files found matching "${keyword}"`);
-                return;
-            }
-
-            let response = `Search results for "${keyword}":\n\n`;
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const shortUrl = await shortenUrl(file.mediaUrl);
-                response += `${i + 1}. [${file.category}] ${shortUrl}\n`;
-                if (file.keywords && file.keywords.length > 0) {
-                    response += `   Keywords: ${file.keywords.join(', ')}\n`;
-                }
-                response += '\n';
-            }
-           
-            msg.reply(response);
-            return;
+            case msg.body?.startsWith('#') && !['#help', '#verify', '#search', '#files'].includes(msg.body.split(' ')[0]):
+                await handleCategoryRetrieval(msg, user);
+                break;
         }
 
     } catch (error) {
         console.error('Error:', error);
-        msg.reply('Sorry, there was an error processing your message.');
+        await safeSendReply(msg, 'Sorry, there was an error processing your message.');
     }
 });
+
+// Helper functions for command handling
+async function handleFileRetrieval(msg, user) {
+    const command = msg.body.split(' ');
+    let startDate, endDate;
+    const now = new Date();
+    
+    switch(command[1]) {
+        case 'today':
+            startDate = new Date(now.setHours(0,0,0,0));
+            endDate = new Date(now.setHours(23,59,59,999));
+            break;
+        case 'yesterday':
+            startDate = new Date(now);
+            startDate.setDate(startDate.getDate() - 1);
+            startDate.setHours(0,0,0,0);
+            endDate = new Date(startDate);
+            endDate.setHours(23,59,59,999);
+            break;
+        case 'week':
+            startDate = new Date(now);
+            startDate.setDate(startDate.getDate() - 7);
+            endDate = new Date(now);
+            break;
+        default:
+            await safeSendReply(msg, 'Please specify: today, yesterday, or week');
+            return;
+    }
+
+    const files = await Media.find({
+        userId: user._id,
+        timestamp: { $gte: startDate, $lte: endDate }
+    }).sort({ timestamp: -1 });
+
+    if (files.length === 0) {
+        await safeSendReply(msg, `No files found for ${command[1]}`);
+        return;
+    }
+
+    let response = await formatFileResponse(files, command[1]);
+    await safeSendReply(msg, response);
+}
+
+async function handleSearch(msg, user) {
+    const keyword = msg.body.slice(8).trim().toLowerCase();
+    if (!keyword) {
+        await safeSendReply(msg, 'Please provide a search keyword');
+        return;
+    }
+
+    const files = await Media.find({
+        userId: user._id,
+        $or: [
+            { keywords: { $regex: keyword, $options: 'i' } },
+            { 'metadata.subject': { $regex: keyword, $options: 'i' } },
+            { category: { $regex: keyword, $options: 'i' } }
+        ]
+    }).sort({ timestamp: -1 });
+
+    if (files.length === 0) {
+        await safeSendReply(msg, `No files found matching "${keyword}"`);
+        return;
+    }
+
+    let response = await formatSearchResponse(files, keyword);
+    await safeSendReply(msg, response);
+}
+
+async function formatFileResponse(files, timeframe) {
+    let groupedFiles = {};
+    files.forEach(file => {
+        if (!groupedFiles[file.category]) {
+            groupedFiles[file.category] = [];
+        }
+        groupedFiles[file.category].push(file);
+    });
+
+    let response = `Files from ${timeframe}:\n\n`;
+    for (const category in groupedFiles) {
+        response += `${category.toUpperCase()}:\n`;
+        for (let i = 0; i < groupedFiles[category].length; i++) {
+            const file = groupedFiles[category][i];
+            const shortUrl = await shortenUrl(file.mediaUrl);
+            response += `${i + 1}. ${shortUrl}\n`;
+            if (file.keywords?.length > 0) {
+                response += `   Keywords: ${file.keywords.join(', ')}\n`;
+            }
+        }
+        response += '\n';
+    }
+    return response;
+}
+
+async function formatSearchResponse(files, keyword) {
+    let response = `Search results for "${keyword}":\n\n`;
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const shortUrl = await shortenUrl(file.mediaUrl);
+        response += `${i + 1}. [${file.category}] ${shortUrl}\n`;
+        if (file.keywords?.length > 0) {
+            response += `   Keywords: ${file.keywords.join(', ')}\n`;
+        }
+        response += '\n';
+    }
+    return response;
+}
 
 client.initialize();
 
 module.exports = client;
+

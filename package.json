@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "init-whatsapp": "node initWhatsApp.js",
+    "reset-whatsapp": "node resetWhatsApp.js"
   },
   "keywords": [],
   "author": "",
@@ -20,6 +22,7 @@
     "express-session": "^1.18.1",
     "mongoose": "^8.10.1",
     "nodemailer": "^6.10.0",
+    "qr-image": "^3.2.0",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.26.0"
   }
