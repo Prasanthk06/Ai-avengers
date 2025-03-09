@@ -262,39 +262,52 @@
                 button.disabled = true;
                 button.textContent = 'Reconnecting...';
                 
+                // Show immediate feedback before sending request
+                document.getElementById('qr-status').innerHTML = `
+                    <div class="alert alert-warning">
+                        <p>Starting reconnection process... This may take a minute.</p>
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                `;
+                
                 const response = await fetch('/whatsapp-reconnect', {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
                 });
+                
                 const data = await response.json();
                 
                 alert(data.message);
                 
-                // Show immediate feedback
+                // Show instructional message
                 document.getElementById('qr-status').innerHTML = `
-                    <p>Waiting for new QR code...</p>
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading...</span>
+                    <div class="alert alert-info">
+                        <p>Reconnection process started. Please wait 60 seconds, then refresh this page.</p>
+                        <p>If no QR code appears after refreshing, click the "Refresh Status" button.</p>
+                        <button class="btn btn-primary mt-2" onclick="window.location.reload()">Refresh Page</button>
                     </div>
                 `;
                 
-                // Poll for status updates to catch the moment when QR code appears
-                let pollCount = 0;
-                const maxPolls = 60; // Poll for up to 2 minutes
-                const pollInterval = setInterval(() => {
-                    pollCount++;
-                    updateStatus();
-                    
-                    if (pollCount >= maxPolls) {
-                        clearInterval(pollInterval);
-                        button.disabled = false;
-                        button.textContent = 'Force Reconnect';
-                    }
-                }, 2000); // Check every 2 seconds
+                // Disable refresh status polling during reconnection to prevent interference
+                clearInterval(window.statusUpdateInterval);
+                
+                // Allow button to be re-enabled after 3 minutes
+                setTimeout(() => {
+                    button.disabled = false;
+                    button.textContent = 'Force Reconnect';
+                }, 3 * 60 * 1000);
+                
             } catch (error) {
                 console.error('Error forcing reconnect:', error);
-                alert('Failed to force reconnect: ' + error.message);
-                this.disabled = false;
-                this.textContent = 'Force Reconnect';
+                alert('Connection error while trying to reconnect. Please refresh the page and try again.');
+                
+                const button = document.getElementById('force-reconnect');
+                button.disabled = false;
+                button.textContent = 'Force Reconnect';
             }
         });
         
@@ -302,7 +315,10 @@
         updateStatus();
         
         // Regular status updates every 10 seconds
-        setInterval(updateStatus, 10000);
+        if (window.statusUpdateInterval) {
+            clearInterval(window.statusUpdateInterval);
+        }
+        window.statusUpdateInterval = setInterval(updateStatus, 10000);
     </script>
 </body>
 </html> 

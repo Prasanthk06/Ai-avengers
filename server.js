@@ -8,6 +8,7 @@ const bcrypt = require('bcrypt');
 const { User, Media } = require('./database');
 const nodemailer = require('nodemailer');
 const fs = require('fs');
+const FileStore = require('session-file-store')(session);
 
 const app = express();
 app.set('view engine','ejs')
@@ -19,12 +20,19 @@ connectDB();
 // Add session handling
 
 app.use(session({
+    store: new FileStore({
+        path: path.join(process.cwd(), 'sessions'),
+        ttl: 86400, // 1 day
+        retries: 0,
+        logFn: function(){},  // Silence logs
+        reapInterval: 3600    // Delete expired sessions hourly
+    }),
     secret: process.env.SESSION_SECRET || 'abcdefghijklmnopq',
     resave: false,
     saveUninitialized: false,
     cookie: {
         // Only use secure cookies if not in development and if using HTTPS
-        secure: process.env.NODE_ENV === 'production' ? false : false,
+        secure: false,
         maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
         httpOnly: true,
         sameSite: 'lax'
@@ -198,53 +206,59 @@ app.post('/whatsapp-reconnect', requireAdmin, async (req, res) => {
     global.lastReconnectTime = Date.now();
     
     try {
-        if (client.info) {
-            // Get current state information
-            const state = await client.getState().catch(e => 'ERROR: ' + e.message);
+        // Send response immediately to prevent timeout
+        res.json({ 
+            success: true, 
+            message: 'Reconnection process started. This will take up to 60 seconds. Refresh this page after 1 minute to see the new status.'
+        });
+        
+        // Get current state safely
+        let state = 'Unknown';
+        try {
+            if (client.pupPage && !client.pupPage.isClosed()) {
+                state = await client.getState().catch(e => 'Error: ' + e.message);
+            }
             console.log(`Current WhatsApp state before reconnect: ${state}`);
+        } catch (stateError) {
+            console.log('Error getting state:', stateError.message);
         }
         
-        // Force client destroy and reinitialize
+        // Force client destroy with error handling
         console.log('Destroying WhatsApp client...');
-        await client.destroy();
-        console.log('Client destroyed, waiting 15 seconds...');
+        try {
+            if (client.pupBrowser || client.pupPage) {
+                await client.destroy().catch(e => console.log('Destroy error:', e.message));
+            }
+        } catch (destroyError) {
+            console.log('Error during destroy operation:', destroyError.message);
+            // If destroy fails, attempt to force close the browser
+            if (client.pupBrowser) {
+                await client.pupBrowser.close().catch(e => console.log('Browser close error:', e.message));
+            }
+        }
+        
+        console.log('Client destroyed, waiting 20 seconds...');
         
         // Longer delay before reinitialization
-        await new Promise(r => setTimeout(r, 15000));
+        await new Promise(r => setTimeout(r, 20000));
         
-        // Clear any existing QR throttling
-        if (typeof qrRegenerationCount !== 'undefined') {
-            qrRegenerationCount = 0;
+        // Clear any QR throttling
+        if (typeof client.qrRegenerationCount !== 'undefined') {
+            client.qrRegenerationCount = 0;
         }
-        if (typeof lastQrGeneration !== 'undefined') {
-            lastQrGeneration = 0;
+        if (typeof client.lastQrGeneration !== 'undefined') {
+            client.lastQrGeneration = 0;
         }
         
         // Initialize again
         console.log('Reinitializing WhatsApp client...');
-        try {
-            await client.initialize();
-            console.log('WhatsApp client reinitialized successfully');
-            
-            res.json({ 
-                success: true, 
-                message: 'WhatsApp client restarted. Please wait for a new QR code to appear (this may take up to 30 seconds). Refresh the page after 30 seconds if no QR appears.'
-            });
-        } catch (initError) {
-            console.error('Failed to initialize WhatsApp client:', initError);
-            res.json({
-                success: false,
-                error: initError.message,
-                message: 'Failed to initialize WhatsApp client. Please try again in 5 minutes.'
-            });
-        }
-    } catch (error) {
-        console.error('Error during WhatsApp reconnection:', error);
-        res.json({ 
-            success: false, 
-            error: error.message,
-            message: 'Failed to restart WhatsApp client. Please try again in 5 minutes.'
+        await client.initialize().catch(error => {
+            console.error('Client initialization error:', error.message);
         });
+        
+        console.log('WhatsApp reconnection process completed');
+    } catch (error) {
+        console.error('Error during WhatsApp reconnection process:', error);
     }
 });
 

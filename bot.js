@@ -281,26 +281,48 @@ async function attemptReconnect() {
     console.log('Attempting to reconnect WhatsApp client...');
     
     try {
-        await client.destroy();
-        console.log('Client destroyed, initializing new instance...');
+        // First check if we need to destroy the client
+        if (client.pupBrowser || client.pupPage) {
+            try {
+                console.log('Attempting to destroy client gracefully...');
+                await client.destroy().catch(e => console.log('Error during client destroy:', e.message));
+            } catch (error) {
+                console.log('Error during destroy operation:', error.message);
+                // If destroy fails, try to force close browser
+                if (client.pupBrowser) {
+                    try {
+                        await client.pupBrowser.close().catch(e => console.log('Browser close error:', e.message));
+                    } catch (err) {
+                        console.log('Failed to close browser:', err.message);
+                    }
+                }
+            }
+        }
         
-        // Longer delay before reinitialization (10 seconds)
-        await new Promise(r => setTimeout(r, 10000));
+        console.log('Client cleanup completed, waiting before reinitializing...');
+        
+        // Longer delay before reinitialization (15 seconds)
+        await new Promise(r => setTimeout(r, 15000));
         
         // Reset QR throttling counters
         qrRegenerationCount = 0;
         lastQrGeneration = 0;
         
-        await client.initialize();
+        console.log('Initializing client...');
+        await client.initialize().catch(e => {
+            console.log('Error during initialization:', e.message);
+            throw e; // Rethrow to be caught by outer try/catch
+        });
+        
         console.log('Client reinitialized successfully');
     } catch (error) {
         console.log('Reconnection attempt failed:', error.message);
     } finally {
-        // Longer cooldown between reconnection attempts (2 minutes)
+        // Longer cooldown between reconnection attempts (3 minutes)
         setTimeout(() => {
             isReconnecting = false;
             console.log('Reconnection cooldown completed');
-        }, 2 * 60 * 1000);
+        }, 3 * 60 * 1000);
     }
 }
 
@@ -734,6 +756,45 @@ async function formatSearchResponse(files, keyword) {
     }
     return response;
 }
+
+// Add this helper function to safely perform operations on the Puppeteer page
+async function safePageOperation(operation, fallbackValue = null) {
+    try {
+        // Check if the page is available and not closed before operation
+        if (!client.pupPage || client.pupPage.isClosed()) {
+            console.log('Page is closed or not available, cannot perform operation');
+            return fallbackValue;
+        }
+        
+        return await operation();
+    } catch (error) {
+        if (error.message.includes('Target closed') || 
+            error.message.includes('Protocol error') ||
+            error.message.includes('Session closed')) {
+            console.log('Browser target closed or session error:', error.message);
+            // Reset page reference to avoid further attempts on closed page
+            if (client.pupPage) {
+                try {
+                    client.pupPage = null;
+                } catch (e) {
+                    // Ignore errors when resetting page
+                }
+            }
+            return fallbackValue;
+        }
+        
+        // For other errors, propagate them
+        throw error;
+    }
+}
+
+// Modify the getState method to use the safe operation helper
+const originalGetState = client.getState;
+client.getState = async function() {
+    return safePageOperation(async () => {
+        return await originalGetState.call(client);
+    }, 'DISCONNECTED'); // Return DISCONNECTED as fallback if operation fails
+};
 
 client.initialize();
 
