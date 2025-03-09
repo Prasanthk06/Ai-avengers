@@ -47,6 +47,12 @@ loginForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   console.log('Login attempt started');
   
+  // Show loading or disable the button
+  const submitButton = loginForm.querySelector('button[type="submit"]');
+  const originalButtonText = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.textContent = 'Logging in...';
+  
   const formData = {
       email: document.getElementById('signin-email').value,
       uniqueCode: document.getElementById('signin-password').value
@@ -59,20 +65,45 @@ loginForm.addEventListener('submit', async (e) => {
           headers: {
               'Content-Type': 'application/json'
           },
-          body: JSON.stringify(formData)
+          body: JSON.stringify(formData),
+          credentials: 'same-origin' // Important for cookies/session
       });
       
       const data = await response.json();
       console.log('Server response:', data);
       
       if (data.success) {
-          window.location.href = '/dashboard';
+          // Add a message before redirecting
+          const loginMessage = document.getElementById('loginMessage');
+          loginMessage.textContent = 'Login successful! Redirecting...';
+          loginMessage.className = 'message success';
+          
+          // Delay redirect slightly to show success message
+          setTimeout(() => {
+              // Use the redirect URL from the response if available
+              window.location.href = data.redirectUrl || '/dashboard';
+          }, 1000);
       } else {
-          alert(data.message);
+          // Show error message
+          const loginMessage = document.getElementById('loginMessage');
+          loginMessage.textContent = data.message || 'Login failed. Please try again.';
+          loginMessage.className = 'message error';
+          
+          // Reset button
+          submitButton.disabled = false;
+          submitButton.textContent = originalButtonText;
       }
   } catch (error) {
       console.error('Login error:', error);
-      alert('Login failed. Please try again.');
+      
+      // Show error message
+      const loginMessage = document.getElementById('loginMessage');
+      loginMessage.textContent = 'Connection error. Please try again.';
+      loginMessage.className = 'message error';
+      
+      // Reset button
+      submitButton.disabled = false;
+      submitButton.textContent = originalButtonText;
   }
 });
 

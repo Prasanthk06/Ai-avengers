@@ -23,8 +23,11 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     cookie: {
-        secure: process.env.NODE_ENV === 'production',
-        maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
+        // Only use secure cookies if not in development and if using HTTPS
+        secure: process.env.NODE_ENV === 'production' ? false : false,
+        maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+        httpOnly: true,
+        sameSite: 'lax'
     }
 }));
 
@@ -40,23 +43,34 @@ const transporter = nodemailer.createTransport({
 
 // Protected route middleware
 const requireAuth = (req, res, next) => {
+    console.log('Auth check - Session:', req.session);
+    console.log('Auth check - User ID:', req.session.userId);
+    
     if (!req.session.userId) {
+        console.log('Auth failed - redirecting to login');
         return res.redirect('/login');
     }
+    console.log('Auth passed for user ID:', req.session.userId);
     next();
 };
 
 // Admin route middleware
 const requireAdmin = (req, res, next) => {
+    console.log('Admin check - Session:', req.session);
+    
     if (!req.session.userId) {
+        console.log('Admin check failed - no session - redirecting to login');
         return res.redirect('/login');
     }
     
     User.findById(req.session.userId)
         .then(user => {
+            console.log('Admin check - User found:', user ? user.isAdmin : 'No user');
             if (!user || !user.isAdmin) {
+                console.log('Admin check failed - not an admin');
                 return res.status(403).send('Access denied');
             }
+            console.log('Admin check passed for user:', user.email);
             next();
         })
         .catch(err => {
@@ -180,24 +194,43 @@ app.get('/login',(req,res)=>
 app.post('/login', async (req, res) => {
     const { email, uniqueCode } = req.body;
     
+    console.log('Login attempt:', { email, uniqueCodeProvided: !!uniqueCode });
+    
     try {
         const user = await User.findOne({ email, uniqueCode });
+        
         if (!user) {
+            console.log('User not found with provided credentials');
             return res.json({ success: false, message: 'Invalid credentials' });
         }
 
+        console.log('User found:', { id: user._id, name: user.name, isVerified: user.isVerified });
+
         req.session.user = {
             username: user.name,
-          };
+        };
         
         if (!user.isVerified) {
+            console.log('User not verified');
             return res.json({ success: false, message: 'Please verify your WhatsApp first' });
         }
         
+        // Set session data
         req.session.userId = user._id;
-        res.json({ success: true, message: 'Login successful' });
+        
+        // Save session explicitly before responding
+        req.session.save((err) => {
+            if (err) {
+                console.error('Session save error:', err);
+                return res.json({ success: false, message: 'Session error. Please try again.' });
+            }
+            
+            console.log('Login successful, session saved:', req.session.userId);
+            res.json({ success: true, message: 'Login successful', redirectUrl: '/dashboard' });
+        });
     } catch (error) {
-        res.json({ success: false, message: 'Login failed' });
+        console.error('Login error:', error);
+        res.json({ success: false, message: 'Login failed due to server error' });
     }
 });
 
