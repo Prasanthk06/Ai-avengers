@@ -32,6 +32,10 @@
             background-color: #f8d7da;
             color: #842029;
         }
+        .warning {
+            background-color: #fff3cd;
+            color: #664d03;
+        }
         .qr-container {
             background: white;
             padding: 20px;
@@ -172,9 +176,48 @@
                     }
                     clientInfo.innerHTML = infoHtml;
                 } else {
-                    statusIndicator.className = 'connection-status disconnected';
-                    statusIndicator.textContent = 'Disconnected';
-                    clientInfo.innerHTML = '<p>Not authenticated</p>';
+                    // Show status based on the more detailed state information
+                    if (data.detailedState && data.detailedState.phantomConnection) {
+                        // Phantom connection state - looks disconnected but might be connected on the phone
+                        statusIndicator.className = 'connection-status warning';
+                        statusIndicator.textContent = 'Phantom Connection';
+                        
+                        // Add additional info about the phantom connection state
+                        clientInfo.innerHTML = `
+                            <p><strong class="text-warning">Phantom Connection Detected</strong></p>
+                            <p>Your phone appears to be connected to WhatsApp but the web client can't detect it.</p>
+                            <p>This is a common issue with WhatsApp Web connections.</p>
+                            <p>Last activity: ${new Date(data.detailedState.lastActivity).toLocaleString() || 'Unknown'}</p>
+                            <hr>
+                            <p><strong>Try these steps:</strong></p>
+                            <ol>
+                                <li>Make sure your phone has an active internet connection</li>
+                                <li>Open WhatsApp on your phone</li>
+                                <li>Click "Complete Reset" if the problem persists</li>
+                            </ol>
+                        `;
+                    } else {
+                        // Standard disconnected state
+                        statusIndicator.className = 'connection-status disconnected';
+                        statusIndicator.textContent = 'Disconnected';
+                        clientInfo.innerHTML = '<p>Not authenticated</p>';
+                        
+                        if (data.connectionState) {
+                            clientInfo.innerHTML += `<p><strong>Connection State:</strong> ${data.connectionState}</p>`;
+                        }
+                        
+                        // Add detailed state information if available
+                        if (data.detailedState) {
+                            const details = data.detailedState;
+                            clientInfo.innerHTML += `
+                                <hr>
+                                <p><strong>Detailed Diagnostics:</strong></p>
+                                <p>Browser page available: ${details.hasPage ? 'Yes' : 'No'}</p>
+                                <p>Page closed: ${details.isClosed ? 'Yes' : 'No'}</p>
+                                <p>Reconnection in progress: ${details.isReconnecting ? 'Yes' : 'No'}</p>
+                            `;
+                        }
+                    }
                     
                     // Update QR status if available
                     if (data.qrAvailable && data.qrFileExists) {
@@ -224,42 +267,24 @@
         document.getElementById('refresh-status').addEventListener('click', updateStatus);
         
         // Restart client
-        document.getElementById('restart-client').addEventListener('click', async function() {
-            try {
-                const button = this;
-                button.disabled = true;
-                button.textContent = 'Restarting...';
-                
-                const response = await fetch('/admin/whatsapp/restart', {
-                    method: 'POST'
-                });
-                const data = await response.json();
-                
-                alert(data.message);
-                
-                // Frequent status polling after restart to catch the QR code
-                let pollCount = 0;
-                const maxPolls = 30; // Poll for up to 1 minute
-                const pollInterval = setInterval(() => {
-                    pollCount++;
-                    updateStatus();
+        document.getElementById('restart-client').addEventListener('click', async () => {
+            if (confirm('Are you sure you want to restart the WhatsApp client?')) {
+                try {
+                    const response = await fetch('/admin/whatsapp/restart', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        }
+                    });
+                    const data = await response.json();
+                    alert(data.message);
                     
-                    if (pollCount >= maxPolls) {
-                        clearInterval(pollInterval);
-                        button.disabled = false;
-                        button.textContent = 'Restart Connection';
-                    }
-                }, 2000); // Check every 2 seconds
-                
-                // Don't reload the page automatically
-                // setTimeout(() => {
-                //     window.location.reload();
-                // }, 5000);
-            } catch (error) {
-                console.error('Error restarting client:', error);
-                alert('Failed to restart client');
-                this.disabled = false;
-                this.textContent = 'Restart Connection';
+                    // Refresh status after a delay
+                    setTimeout(updateStatus, 30000);
+                } catch (error) {
+                    console.error('Error restarting client:', error);
+                    alert('Error restarting client: ' + error.message);
+                }
             }
         });
         
@@ -360,63 +385,68 @@
             }
         });
         
-        // Force reconnect (complete reset and reinitialize)
-        document.getElementById('force-reconnect').addEventListener('click', async function() {
-            if (!confirm('This will completely reset and reinitialize the WhatsApp connection. You will need to scan the QR code again. Continue?')) {
-                return;
-            }
-            
-            try {
-                const button = this;
-                button.disabled = true;
-                button.textContent = 'Reconnecting...';
-                
-                // Show immediate feedback before sending request
-                document.getElementById('qr-status').innerHTML = `
-                    <div class="alert alert-warning">
-                        <p>Starting reconnection process... This may take a minute.</p>
-                        <div class="spinner-border text-primary" role="status">
-                            <span class="visually-hidden">Loading...</span>
-                        </div>
-                    </div>
-                `;
-                
-                const response = await fetch('/whatsapp-reconnect', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
+        // Force reconnect button handler
+        document.getElementById('force-reconnect').addEventListener('click', async () => {
+            if (confirm('Are you sure you want to force reconnect? This will close any existing connections.')) {
+                if (confirm('This may take up to 3 minutes. Do not close this page during the process. Continue?')) {
+                    try {
+                        // First, update UI to show operation in progress
+                        const statusIndicator = document.getElementById('status-indicator');
+                        const clientInfo = document.getElementById('client-info');
+                        
+                        statusIndicator.className = 'connection-status disconnected';
+                        statusIndicator.textContent = 'Reconnecting...';
+                        clientInfo.innerHTML = '<p>Force reconnect in progress...</p><p>This may take up to 3 minutes. Please wait...</p>';
+                        
+                        // Disable buttons during the process
+                        document.getElementById('force-reconnect').disabled = true;
+                        document.getElementById('restart-client').disabled = true;
+                        document.getElementById('regenerate-qr').disabled = true;
+                        
+                        // Make the API call
+                        const response = await fetch('/admin/whatsapp/force-reconnect', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            }
+                        });
+                        const data = await response.json();
+                        
+                        // Update status to show the process is happening
+                        clientInfo.innerHTML += `<p>${data.message}</p>`;
+                        
+                        // Set up auto-refresh of status
+                        let countdown = 180;
+                        const refreshInterval = setInterval(() => {
+                            countdown--;
+                            clientInfo.innerHTML = `
+                                <p>Force reconnect in progress...</p>
+                                <p>Please wait while the connection is reestablished.</p>
+                                <p>Auto-refresh in: ${countdown} seconds</p>
+                            `;
+                            
+                            if (countdown <= 0) {
+                                clearInterval(refreshInterval);
+                                // Re-enable buttons
+                                document.getElementById('force-reconnect').disabled = false;
+                                document.getElementById('restart-client').disabled = false;
+                                document.getElementById('regenerate-qr').disabled = false;
+                                
+                                // Refresh the entire page to get fresh state
+                                window.location.reload();
+                            }
+                        }, 1000);
+                        
+                    } catch (error) {
+                        console.error('Error forcing reconnect:', error);
+                        alert('Error forcing reconnect: ' + error.message);
+                        
+                        // Re-enable buttons
+                        document.getElementById('force-reconnect').disabled = false;
+                        document.getElementById('restart-client').disabled = false;
+                        document.getElementById('regenerate-qr').disabled = false;
                     }
-                });
-                
-                const data = await response.json();
-                
-                alert(data.message);
-                
-                // Show instructional message
-                document.getElementById('qr-status').innerHTML = `
-                    <div class="alert alert-info">
-                        <p>Reconnection process started. Please wait 60 seconds, then refresh this page.</p>
-                        <p>If no QR code appears after refreshing, click the "Refresh Status" button.</p>
-                        <button class="btn btn-primary mt-2" onclick="window.location.reload()">Refresh Page</button>
-                    </div>
-                `;
-                
-                // Disable refresh status polling during reconnection to prevent interference
-                clearInterval(window.statusUpdateInterval);
-                
-                // Allow button to be re-enabled after 3 minutes
-                setTimeout(() => {
-                    button.disabled = false;
-                    button.textContent = 'Force Reconnect';
-                }, 3 * 60 * 1000);
-                
-            } catch (error) {
-                console.error('Error forcing reconnect:', error);
-                alert('Connection error while trying to reconnect. Please refresh the page and try again.');
-                
-                const button = document.getElementById('force-reconnect');
-                button.disabled = false;
-                button.textContent = 'Force Reconnect';
+                }
             }
         });
         

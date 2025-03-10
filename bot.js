@@ -15,28 +15,47 @@ const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB limit
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const AUTH_FOLDER_PATH = path.join(process.cwd(), '.wwebjs_auth');
 const CACHE_FOLDER_PATH = path.join(process.cwd(), '.wwebjs_cache');
-const DEBUG_MODE = true;
-const REDUCE_DELAYS = true; // Flag to reduce delays in message processing
-const PERFORMANCE_MODE = true; // Enable all performance optimizations
-const PRELOAD_USER_DATA = true; // Preload user data for faster responses
-const MAX_CONCURRENT_OPERATIONS = 10; // Limit concurrent operations to prevent overload
-const DIRECT_REPLY_MODE = true; // Use the most direct reply method possible for lowest latency
-const MAX_QR_REGENERATIONS = 5; // Maximum allowed QR generations before cooling down
-const QR_THRESHOLD_COOLDOWN = 60000; // 1 minute cooldown if too many QRs
-const QR_THROTTLE_MS = 30000; // Minimum 30 seconds between QR generations
+const STABLE_CLIENT_ID = "main-whatsapp-client";
+
+// Performance settings
+const PERFORMANCE_CONFIG = {
+    DEBUG_MODE: true,
+    REDUCE_DELAYS: true,
+    PERFORMANCE_MODE: true,
+    PRELOAD_USER_DATA: true,
+    MAX_CONCURRENT_OPERATIONS: 10,
+    DIRECT_REPLY_MODE: true
+};
+
+// QR code settings
+const QR_CONFIG = {
+    MAX_REGENERATIONS: 5,
+    THRESHOLD_COOLDOWN: 60000, // 1 minute cooldown if too many QRs
+    THROTTLE_MS: 30000 // Minimum 30 seconds between QR generations
+};
+
+// Reconnection settings
+const RECONNECT_CONFIG = {
+    STANDARD_DELAY: 15000, // 15 seconds
+    COOLDOWN_PERIOD: 180000, // 3 minutes
+    MIN_ACTIVITY_CHECK: 15, // minutes
+    CONNECTION_CHECK_INTERVAL: 300000 // 5 minutes
+};
 
 // Client reference for external updates
 let clientRef;
 
-// Runtime variables
-let qrRegenerationCount = 0;
-let lastQrGeneration = 0;
-let isReconnecting = false;
-let connectionAttempts = 0;
-let isInitialized = false;
-let lastStatusCheck = Date.now();
-let connectionCheckInterval = null;
-let qrRetryTimeout = null; // To track QR retry timeout
+// Runtime variables - centralize all state variables
+const STATE = {
+    qrRegenerationCount: 0,
+    lastQrGeneration: 0,
+    isReconnecting: false,
+    connectionAttempts: 0,
+    isInitialized: false,
+    lastStatusCheck: Date.now(),
+    lastConnectionCheck: Date.now(),
+    reconnectTimer: null
+};
 
 // Initialize Gemini and Storage
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -100,7 +119,7 @@ console.log('Setting up WhatsApp event handlers...');
 // Helper Functions
 async function safeSendReply(msg, content) {
     // For absolutely minimal latency, use a highly optimized direct approach
-    if (DIRECT_REPLY_MODE && PERFORMANCE_MODE) {
+    if (PERFORMANCE_CONFIG.DIRECT_REPLY_MODE && PERFORMANCE_CONFIG.PERFORMANCE_MODE) {
         // For ping commands, use the absolute fastest path
         if (content.includes('Pong!')) {
             try {
@@ -221,10 +240,60 @@ function parseDate(dateString) {
 // Call function to ensure directories exist before initializing client
 ensureDirectoriesExist();
 
-// Add a more stable client ID that doesn't change between sessions
-const STABLE_CLIENT_ID = "main-whatsapp-client";
+// Add a centralized QR code generation function
+async function generateAndSaveQrCode(qrString) {
+    if (!qrString || typeof qrString !== 'string') {
+        console.log('Invalid QR string provided');
+        return null;
+    }
+    
+    try {
+        // 1. Generate and display QR in terminal
+        qrcode.generate(qrString, { small: true });
+        console.log(`QR Code generated at ${new Date().toISOString()}`);
+        
+        // 2. Save QR to file for web interface
+        const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+        const qrCode = require('qr-image');
+        const qrImg = qrCode.image(qrString, { type: 'png' });
+        
+        // Create a promise for the file write operation
+        return new Promise((resolve, reject) => {
+            const qrStream = fs.createWriteStream(qrPath);
+            
+            qrImg.pipe(qrStream);
+            
+            // Handle successful completion
+            qrStream.on('finish', () => {
+                // Update global timestamp
+                global.lastQrTimestamp = new Date().toISOString();
+                console.log(`QR Code saved to file: ${qrPath}`);
+                resolve({
+                    success: true,
+                    path: qrPath,
+                    timestamp: global.lastQrTimestamp
+                });
+            });
+            
+            // Handle errors
+            qrStream.on('error', (err) => {
+                console.log('Error saving QR file:', err.message);
+                reject(err);
+            });
+        });
+    } catch (error) {
+        console.log('Error generating QR code:', error.message);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
 
-// Extract event handler setup to a function for reuse during reconnection
+// Export the QR generation function
+module.exports.generateQrCode = generateAndSaveQrCode;
+
+// Update setupClientEventHandlers to use the centralized QR generation function
 function setupClientEventHandlers(clientInstance) {
     if (!clientInstance) return;
     
@@ -233,54 +302,32 @@ function setupClientEventHandlers(clientInstance) {
         // Throttle QR code regeneration to prevent flooding
         const now = Date.now();
         
-        // Log QR regeneration with timestamp
-        console.log(`QR Code generated at ${new Date().toISOString()}`);
-        
-        // Display QR in terminal for debugging
-        qrcode.generate(qr, { small: true });
-        
-        if (qrRegenerationCount++ > MAX_QR_REGENERATIONS) {
+        // Check throttling
+        if (STATE.qrRegenerationCount++ > QR_CONFIG.MAX_REGENERATIONS) {
             console.log('Too many QR regenerations, pausing client...');
-            await new Promise(r => setTimeout(r, QR_THRESHOLD_COOLDOWN));
-            qrRegenerationCount = 0;
+            await new Promise(r => setTimeout(r, QR_CONFIG.THRESHOLD_COOLDOWN));
+            STATE.qrRegenerationCount = 0;
         }
         
-        // Always save the QR code to a file for the web interface
-        try {
-            const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
-            const qrCode = require('qr-image');
-            const qrImg = qrCode.image(qr, { type: 'png' });
-            const qrStream = fs.createWriteStream(qrPath);
-            
-            qrImg.pipe(qrStream);
-            
-            // Set timestamp when ready
-            qrStream.on('finish', () => {
-                global.lastQrTimestamp = new Date().toISOString();
-                console.log(`QR Code saved to file: ${qrPath}`);
-            });
-            
-            qrStream.on('error', (e) => {
-                console.log('Error saving QR file:', e.message);
-            });
-            
-        } catch (e) {
-            console.log('QR generation error:', e.message);
-        }
+        // Generate and save QR code
+        await generateAndSaveQrCode(qr).catch(err => {
+            console.log('Failed to save QR code:', err.message);
+        });
         
-        lastQrGeneration = now;
+        // Update the last generation timestamp
+        STATE.lastQrGeneration = now;
     });
     
     // Ready event
     clientInstance.on('ready', async () => {
         console.log('WhatsApp client is ready!');
-        isInitialized = true;
-        lastStatusCheck = Date.now();
-        connectionAttempts = 0;
-        qrRegenerationCount = 0;
+        STATE.isInitialized = true;
+        STATE.lastStatusCheck = Date.now();
+        STATE.connectionAttempts = 0;
+        STATE.qrRegenerationCount = 0;
         
         // Reset reconnection flags
-        isReconnecting = false;
+        STATE.isReconnecting = false;
         
         // Log client info for debugging
         try {
@@ -295,13 +342,13 @@ function setupClientEventHandlers(clientInstance) {
     // Disconnect event
     clientInstance.on('disconnected', async (reason) => {
         console.log('WhatsApp client was disconnected:', reason);
-        isInitialized = false;
+        STATE.isInitialized = false;
         
         // Wait a bit before attempting to reconnect
         await new Promise(r => setTimeout(r, 5000));
         
         // Only reconnect if not already reconnecting
-        if (!isReconnecting) {
+        if (!STATE.isReconnecting) {
             await attemptReconnect();
         }
     });
@@ -310,8 +357,8 @@ function setupClientEventHandlers(clientInstance) {
     clientInstance.on('authenticated', () => {
         console.log('WhatsApp client authenticated!');
         // Reset QR counters on successful authentication
-        qrRegenerationCount = 0;
-        connectionAttempts = 0;
+        STATE.qrRegenerationCount = 0;
+        STATE.connectionAttempts = 0;
         
         if (clientInstance.info) {
             console.log('Connected as:', clientInstance.info.wid.user);
@@ -321,7 +368,7 @@ function setupClientEventHandlers(clientInstance) {
     // Auth failure event
     clientInstance.on('auth_failure', msg => {
         console.log('Authentication failed:', msg);
-        connectionAttempts++;
+        STATE.connectionAttempts++;
     });
     
     // Message create event
@@ -415,21 +462,21 @@ let reconnectTimer = null;
 // Start connection monitoring
 function startConnectionMonitor() {
     // Clear existing interval if it exists
-    if (connectionCheckInterval) {
-        clearInterval(connectionCheckInterval);
+    if (global.connectionCheckInterval) {
+        clearInterval(global.connectionCheckInterval);
     }
     
     // Set up a new interval
-    connectionCheckInterval = setInterval(async () => {
-        if (isReconnecting) return; // Skip if already reconnecting
+    global.connectionCheckInterval = setInterval(async () => {
+        if (STATE.isReconnecting) return; // Skip if already reconnecting
         
         try {
             // Get minutes since last status check
-            const minutesSinceLastCheck = (Date.now() - lastStatusCheck) / (1000 * 60);
+            const minutesSinceLastCheck = (Date.now() - STATE.lastStatusCheck) / (1000 * 60);
             console.log(`Connection monitor check: Last status check ${Math.round(minutesSinceLastCheck)} minutes ago`);
             
-            // If more than 15 minutes since last check, check if client is still responsive
-            if (minutesSinceLastCheck > 15) {
+            // If more than defined threshold since last check, check if client is still responsive
+            if (minutesSinceLastCheck > RECONNECT_CONFIG.MIN_ACTIVITY_CHECK) {
                 const isAlive = await checkClientConnection();
                 
                 if (!isAlive) {
@@ -437,15 +484,17 @@ function startConnectionMonitor() {
                     await attemptReconnect();
                 } else {
                     console.log('Client connection is healthy');
-                    lastStatusCheck = Date.now();
+                    STATE.lastStatusCheck = Date.now();
+                    global.lastClientActivity = Date.now();
                 }
             }
         } catch (e) {
             console.log('Error in connection monitor:', e.message);
         }
-    }, 5 * 60 * 1000); // Check every 5 minutes
+    }, RECONNECT_CONFIG.CONNECTION_CHECK_INTERVAL); // Check every 5 minutes
     
     console.log('Connection monitor started');
+    return global.connectionCheckInterval;
 }
 
 // Utility function to check if the client connection is still alive
@@ -474,6 +523,12 @@ async function checkClientConnection() {
             return false;
         }
         
+        // Additional check for authenticated state
+        if (clientRef.info && clientRef.info.wid) {
+            // Client has valid user info - definitely connected
+            return true;
+        }
+        
         return true;
     } catch (error) {
         console.log('Error checking client connection:', error.message);
@@ -484,145 +539,284 @@ async function checkClientConnection() {
 // Export the checkClientConnection function
 module.exports.checkClientConnection = checkClientConnection;
 
-// Add a special function to ensure client is up after Railway deployment
-setTimeout(() => {
-    // Check client status 2 minutes after startup
-    console.log('Performing post-startup connection check...');
+// Shared function for client cleanup to avoid code duplication
+async function cleanupClient(client, options = {}) {
+    const { logPrefix = '', aggressive = false, waitTime = 5000 } = options;
     
-    if (!client.info) {
-        console.log('Client appears to be disconnected, attempting to initialize...');
-        client.initialize().catch(e => {
-            console.error('Failed to initialize client:', e.message);
-        });
-    } else {
-        console.log('Client is connected and ready');
+    if (!client) {
+        console.log(`${logPrefix}No client to clean up`);
+        return;
     }
     
-    // Start the ongoing connection monitor
-    startConnectionMonitor();
-}, 2 * 60 * 1000);
+    try {
+        console.log(`${logPrefix}Starting client cleanup...`);
+        
+        // First try to destroy the client properly
+        if (typeof client.destroy === 'function') {
+            try {
+                await client.destroy().catch(e => console.log(`${logPrefix}Client destroy error:`, e.message));
+                console.log(`${logPrefix}Safe destroy called`);
+            } catch (e) {
+                console.log(`${logPrefix}Error during client destroy:`, e.message);
+            }
+        }
+        
+        // Force close browser if it exists
+        if (client.pupBrowser) {
+            try {
+                await client.pupBrowser.close().catch(e => console.log(`${logPrefix}Browser close error:`, e.message));
+            } catch (e) {
+                console.log(`${logPrefix}Failed to close browser:`, e.message);
+            }
+        }
+        
+        // Clear references
+        if (client.pupPage) client.pupPage = null;
+        if (client.pupBrowser) client.pupBrowser = null;
+        
+        // More aggressive cleanup if requested
+        if (aggressive) {
+            // Clear auth strategy references
+            if (client.authStrategy) {
+                client.authStrategy.client = null;
+            }
+            
+            // Clear any event listeners
+            if (typeof client.removeAllListeners === 'function') {
+                client.removeAllListeners();
+            }
+            
+            // Force garbage collection if available
+            if (global.gc) {
+                try {
+                    global.gc();
+                    console.log(`${logPrefix}Forced garbage collection`);
+                } catch (e) {
+                    console.log(`${logPrefix}GC error:`, e.message);
+                }
+            }
+            
+            // Extra cleanup for persistent issues
+            try {
+                // Clear session files if needed
+                if (options.clearSession) {
+                    console.log(`${logPrefix}Cleaning up session files...`);
+                    cleanupSessionFiles();
+                }
+            } catch (e) {
+                console.log(`${logPrefix}Error during additional cleanup:`, e.message);
+            }
+        }
+        
+        console.log(`${logPrefix}Client cleanup completed, waiting ${waitTime/1000} seconds before continuing...`);
+        
+        // Wait for resources to be released
+        if (waitTime > 0) {
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+    } catch (error) {
+        console.log(`${logPrefix}Unexpected error during client cleanup:`, error.message);
+    }
+}
 
-// Connection monitoring with improved error handling
-// These variables are already declared at the top of the file
-// let connectionCheckInterval;
-// let qrRetryTimeout; 
+// Helper function to clean session files
+function cleanupSessionFiles() {
+    try {
+        const sessionPath = path.join(AUTH_FOLDER_PATH, `session-${STABLE_CLIENT_ID}`);
+        
+        if (fs.existsSync(sessionPath)) {
+            const tempFiles = ['Default/Cache', 'Default/Code Cache', 'Default/GPUCache', 
+                             'Default/Service Worker', 'Default/Session Storage'];
+            
+            for (const tempDir of tempFiles) {
+                const fullPath = path.join(sessionPath, tempDir);
+                if (fs.existsSync(fullPath)) {
+                    try {
+                        fs.rmSync(fullPath, { recursive: true, force: true });
+                        console.log(`Cleaned up ${tempDir}`);
+                    } catch (e) {
+                        console.log(`Failed to clean ${tempDir}:`, e.message);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.log('Error cleaning session files:', error.message);
+    }
+}
 
-// Add a reconnect function that can be called when connection issues occur
-async function attemptReconnect() {
-    if (isReconnecting) return;
+// Helper function to create a new client with consistent configuration
+function createNewClient(options = {}) {
+    const { timeoutMultiplier = 1, clientId = STABLE_CLIENT_ID } = options;
     
-    isReconnecting = true;
+    // Create fresh auth strategy
+    const freshAuthStrategy = new LocalAuth({
+        clientId: clientId,
+        dataPath: AUTH_FOLDER_PATH
+    });
+    
+    // Create a new client with consistent configuration
+    return new Client({
+        authStrategy: freshAuthStrategy,
+        puppeteer: {
+            headless: 'new',
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--disable-features=site-per-process,TranslateUI',
+                '--disable-extensions',
+                '--js-flags=--expose-gc',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-ipc-flooding-protection',
+                '--aggressive-cache-discard',
+                '--disable-background-networking',
+                '--no-default-browser-check', 
+                '--no-first-run'
+            ],
+            ignoreHTTPSErrors: true,
+            defaultViewport: null,
+            timeout: 120000 * timeoutMultiplier,
+            protocolTimeout: 60000 * timeoutMultiplier
+        },
+        authTimeoutMs: 120000 * timeoutMultiplier,
+        queueMessages: false,
+        restartOnCrash: true,
+        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        webVersionCache: { 
+            type: 'remote',
+            remotePath: 'https://web.whatsapp.com'
+        }
+    });
+}
+
+// Updated forceReconnect function using shared helpers
+async function forceReconnect() {
+    console.log('Force reconnect requested - handling potential phantom connection');
+    
+    if (STATE.isReconnecting) {
+        console.log('Reconnection already in progress, waiting...');
+        return false;
+    }
+    
+    STATE.isReconnecting = true;
+    
+    try {
+        // 1. Try to get the current state to confirm if we're in a phantom state
+        let currentState = 'UNKNOWN';
+        try {
+            if (clientRef) {
+                currentState = await clientRef.getState().catch(() => 'ERROR');
+            }
+        } catch (e) {
+            console.log('Error getting state during force reconnect:', e.message);
+        }
+        
+        console.log(`Current client state before force reconnect: ${currentState}`);
+        
+        // 2. Perform an aggressive cleanup
+        await cleanupClient(clientRef, {
+            logPrefix: '[ForceReconnect] ',
+            aggressive: true,
+            clearSession: true,
+            waitTime: 10000
+        });
+        
+        // 3. Create a completely new client instance
+        try {
+            console.log('Creating new client instance after force reconnect');
+            
+            // Create with extended timeouts for reliability
+            const newClient = createNewClient({ timeoutMultiplier: 1.5 });
+            
+            // Set up event handlers
+            setupClientEventHandlers(newClient);
+            
+            // Initialize the new client
+            console.log('Initializing new client instance after force reconnect...');
+            await newClient.initialize();
+            
+            // Update client references
+            clientRef = newClient;
+            
+            // Update the exported client module
+            if (module.exports.updateClient) {
+                module.exports.updateClient(newClient);
+                console.log('Client reference updated successfully after force reconnect');
+            }
+            
+            // Reset state variables
+            STATE.isReconnecting = false;
+            STATE.connectionAttempts = 0;
+            STATE.qrRegenerationCount = 0;
+            STATE.lastStatusCheck = Date.now();
+            global.lastClientActivity = Date.now();
+            
+            console.log('Force reconnect completed successfully');
+            return true;
+            
+        } catch (e) {
+            console.error('Error creating new client during force reconnect:', e);
+            return false;
+        }
+    } catch (e) {
+        console.error('Error in force reconnect:', e);
+        return false;
+    } finally {
+        // Ensure we reset the reconnecting flag even on error
+        setTimeout(() => {
+            STATE.isReconnecting = false;
+            console.log('Force reconnect cooldown completed');
+        }, 60000); // 1 minute cooldown
+    }
+}
+
+// Updated attemptReconnect function using shared helpers
+async function attemptReconnect() {
+    if (STATE.isReconnecting) return;
+    
+    STATE.isReconnecting = true;
     console.log('Attempting to reconnect WhatsApp client...');
     
     try {
-        // First properly destroy the existing client
-        try {
-            if (clientRef && (clientRef.pupBrowser || clientRef.pupPage)) {
-                console.log('Attempting to destroy client gracefully...');
-                
-                // Try to destroy using our safe method
-                if (typeof clientRef.destroy === 'function') {
-                    try {
-                        await clientRef.destroy().catch(e => console.log('Error during client destroy:', e.message));
-                    } catch (e) {
-                        console.log('Client destroy error (continuing):', e.message);
-                    }
-                }
-                
-                // Extra safety: directly close browser if it exists
-                if (clientRef.pupBrowser) {
-                    try {
-                        await clientRef.pupBrowser.close().catch(e => console.log('Browser close error:', e.message));
-                    } catch (e) {
-                        console.log('Failed to close browser:', e.message);
-                    }
-                }
-                
-                // Clear references
-                if (clientRef.pupPage) clientRef.pupPage = null;
-                if (clientRef.pupBrowser) clientRef.pupBrowser = null;
-            }
-        } catch (cleanupError) {
-            console.log('Error during client cleanup:', cleanupError.message);
-        }
-        
-        console.log('Client cleanup completed, waiting before reinitializing...');
-        
-        // Longer delay before reinitialization
-        await new Promise(r => setTimeout(r, 15000));
+        // Perform standard cleanup
+        await cleanupClient(clientRef, {
+            logPrefix: '[Reconnect] ',
+            aggressive: false,
+            waitTime: RECONNECT_CONFIG.STANDARD_DELAY
+        });
         
         // Reset QR throttling counters
-        qrRegenerationCount = 0;
-        lastQrGeneration = 0;
+        STATE.qrRegenerationCount = 0;
+        STATE.lastQrGeneration = 0;
         
-        // CRITICAL FIX: Instead of reinitializing the existing client, create a new client instance
+        // Create a new client instance
         try {
             console.log('Safe initialize called');
             
-            // Create a fresh instance of the auth strategy
-            const freshAuthStrategy = new LocalAuth({
-                clientId: STABLE_CLIENT_ID,
-                dataPath: AUTH_FOLDER_PATH
-            });
+            // Create a new client with standard configuration
+            const newClient = createNewClient();
             
-            // Create a completely new client with the same configuration
-            const newClient = new Client({
-                authStrategy: freshAuthStrategy,
-                puppeteer: {
-                    headless: 'new',
-                    handleSIGINT: false,
-                    handleSIGTERM: false,
-                    handleSIGHUP: false,
-                    args: [
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-gpu',
-                        '--disable-dev-shm-usage',
-                        '--disable-web-security',
-                        '--disable-features=site-per-process,TranslateUI',
-                        '--disable-extensions',
-                        '--js-flags=--expose-gc',
-                        '--disable-backgrounding-occluded-windows',
-                        '--disable-component-extensions-with-background-pages',
-                        '--disable-ipc-flooding-protection',
-                        '--aggressive-cache-discard',
-                        '--disable-background-networking',
-                        '--no-default-browser-check', 
-                        '--no-first-run'
-                    ],
-                    ignoreHTTPSErrors: true,
-                    defaultViewport: null,
-                    timeout: 120000,
-                    protocolTimeout: 60000
-                },
-                authTimeoutMs: 120000,
-                queueMessages: false,
-                restartOnCrash: true,
-                userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                webVersionCache: { 
-                    type: 'remote',
-                    remotePath: 'https://web.whatsapp.com'
-                }
-            });
-            
-            // Set up event handlers on the new client
+            // Set up event handlers
             setupClientEventHandlers(newClient);
             
             // Initialize the new client
             console.log('Initializing new client instance...');
             await newClient.initialize();
             
-            // If initialization successful, replace the client reference
+            // Update client references
             clientRef = newClient;
             
             // For compatibility, also patch the exported client module
-            try {
-                if (module.exports.updateClient) {
-                    module.exports.updateClient(newClient);
-                    console.log('Client reference updated successfully');
-                }
-            } catch (updateError) {
-                console.log('Warning: Could not update module exports:', updateError.message);
+            if (module.exports.updateClient) {
+                module.exports.updateClient(newClient);
+                console.log('Client reference updated successfully');
             }
             
             console.log('Client reinitialized successfully with new instance');
@@ -636,18 +830,18 @@ async function attemptReconnect() {
     } catch (error) {
         console.log('Reconnection attempt failed:', error.message);
     } finally {
-        // Longer cooldown between reconnection attempts (3 minutes)
+        // Longer cooldown between reconnection attempts
         setTimeout(() => {
-            isReconnecting = false;
+            STATE.isReconnecting = false;
             console.log('Reconnection cooldown completed');
-        }, 180000);
+        }, RECONNECT_CONFIG.COOLDOWN_PERIOD);
     }
 }
 
 client.on('ready', async () => {
     console.log('Client is ready!');
     
-    if (PRELOAD_USER_DATA && PERFORMANCE_MODE) {
+    if (PERFORMANCE_CONFIG.PRELOAD_USER_DATA && PERFORMANCE_CONFIG.PERFORMANCE_MODE) {
         try {
             console.log('Preloading user data...');
             const users = await User.find({ isVerified: true }).lean();
@@ -666,7 +860,7 @@ client.on('ready', async () => {
         if (!client.pupPage?.isClosed()) {
             console.log('Connection active:', new Date().toISOString());
         }
-    }, 30000);
+    }, RECONNECT_CONFIG.CONNECTION_CHECK_INTERVAL);
 });
 
 client.on('disconnected', async (reason) => {
@@ -720,18 +914,18 @@ Available Commands:
 client.on('qr', async (qr) => {
     // Check if we've generated QR codes too frequently
     const now = Date.now();
-    const timeSinceLastQr = now - lastQrGeneration;
+    const timeSinceLastQr = now - STATE.lastQrGeneration;
     
     // If we regenerated QR too quickly or too many times, throttle it
-    if (timeSinceLastQr < QR_THROTTLE_MS) {
-        qrRegenerationCount++;
-        console.log(`QR regeneration too frequent (${Math.round(timeSinceLastQr/1000)}s), throttling. Count: ${qrRegenerationCount}/${MAX_QR_REGENERATIONS}`);
+    if (timeSinceLastQr < QR_CONFIG.THROTTLE_MS) {
+        STATE.qrRegenerationCount++;
+        console.log(`QR regeneration too frequent (${Math.round(timeSinceLastQr/1000)}s), throttling. Count: ${STATE.qrRegenerationCount}/${QR_CONFIG.MAX_REGENERATIONS}`);
         
-        if (qrRegenerationCount > MAX_QR_REGENERATIONS) {
+        if (STATE.qrRegenerationCount > QR_CONFIG.MAX_REGENERATIONS) {
             console.log('Too many QR regenerations, pausing client...');
             // Add a longer delay before allowing another QR
             setTimeout(() => {
-                qrRegenerationCount = 0; // Reset counter after cooling down
+                STATE.qrRegenerationCount = 0; // Reset counter after cooling down
                 console.log('QR throttling reset after cooling period');
             }, 2 * 60 * 1000); // 2 minute cooling period
             return;
@@ -741,9 +935,9 @@ client.on('qr', async (qr) => {
     }
     
     // We passed the throttle check, update the timestamp and reset counter if needed
-    lastQrGeneration = now;
-    if (timeSinceLastQr > 2 * QR_THROTTLE_MS) {
-        qrRegenerationCount = 0; // Reset counter if it's been a while
+    STATE.lastQrGeneration = now;
+    if (timeSinceLastQr > 2 * QR_CONFIG.THROTTLE_MS) {
+        STATE.qrRegenerationCount = 0; // Reset counter if it's been a while
     }
     
     // Terminal-based QR code (for debugging)
@@ -834,7 +1028,7 @@ client.on('message', async msg => {
     
     try {
         // Immediate acknowledgment for long-running operations
-        if (REDUCE_DELAYS && PERFORMANCE_MODE) {
+        if (PERFORMANCE_CONFIG.REDUCE_DELAYS && PERFORMANCE_CONFIG.PERFORMANCE_MODE) {
             // Only acknowledge messages that would take time to process
             if (msg.hasMedia || (msg.body && (msg.body.startsWith('#') || msg.body.length > 50))) {
                 try {
@@ -856,7 +1050,7 @@ client.on('message', async msg => {
         }
         
         // Add extensive debug logging
-        if (DEBUG_MODE) {
+        if (PERFORMANCE_CONFIG.DEBUG_MODE) {
             console.log('=========== NEW MESSAGE RECEIVED ===========');
             console.log(`ID: ${messageId}`);
             console.log(`From: ${msg.from}`);
@@ -1189,7 +1383,7 @@ async function formatSearchResponse(files, keyword) {
 // Create a faster user lookup function using cache
 async function getVerifiedUser(phoneNumber) {
     // Fast path: check cache first
-    if (PERFORMANCE_MODE && userCache.has(phoneNumber)) {
+    if (PERFORMANCE_CONFIG.PERFORMANCE_MODE && userCache.has(phoneNumber)) {
         return userCache.get(phoneNumber);
     }
     
@@ -1197,7 +1391,7 @@ async function getVerifiedUser(phoneNumber) {
     const user = await User.findOne({ whatsappNumber: phoneNumber, isVerified: true }).lean();
     
     // Update cache for future lookups
-    if (user && PERFORMANCE_MODE) {
+    if (user && PERFORMANCE_CONFIG.PERFORMANCE_MODE) {
         userCache.set(phoneNumber, user);
     }
     
@@ -1244,7 +1438,7 @@ async function safePageOperation(operation, fallbackValue = null) {
             console.log('[SafeOperation] Browser target error:', error.message);
             
             // Mark client for reconnection if needed
-            if (!isReconnecting) {
+            if (!STATE.isReconnecting) {
                 console.log('[SafeOperation] Scheduling reconnection due to closed target');
                 setTimeout(() => attemptReconnect(), 10000);
             }
@@ -1415,4 +1609,25 @@ module.exports.updateClient = function(newClient) {
 
 // Export the setupClientEventHandlers function for use in server.js
 module.exports.setupClientEventHandlers = setupClientEventHandlers;
+
+// Export the forceReconnect function
+module.exports.forceReconnect = forceReconnect;
+
+// Add a special function to ensure client is up after Railway deployment
+setTimeout(() => {
+    // Check client status 2 minutes after startup
+    console.log('Performing post-startup connection check...');
+    
+    if (!client.info) {
+        console.log('Client appears to be disconnected, attempting to initialize...');
+        client.initialize().catch(e => {
+            console.error('Failed to initialize client:', e.message);
+        });
+    } else {
+        console.log('Client is connected and ready');
+    }
+    
+    // Start the ongoing connection monitor
+    startConnectionMonitor();
+}, 2 * 60 * 1000);
 

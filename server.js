@@ -124,83 +124,149 @@ const requireAdmin = (req, res, next) => {
 };
 
 // Improve the WhatsApp status route with better error handling
-app.get('/whatsapp-status', requireAdmin, (req, res) => {
+app.get('/whatsapp-status', requireAdmin, async (req, res) => {
     // Set JSON content type upfront
     res.setHeader('Content-Type', 'application/json');
     
     try {
-        // Check if we have a cached status and it's recent (less than 10 seconds old)
+        // Check if we have a cached status and it's very recent (less than 2 seconds old)
+        // This prevents hammering the server with status checks when browser refreshes
         if (global.cachedWhatsAppStatus && 
-            (Date.now() - global.cachedWhatsAppStatus.timestamp < 10000)) {
+            (Date.now() - global.cachedWhatsAppStatus.timestamp < 2000)) {
+            console.log('Admin check passed - using cached status');
             return res.json(global.cachedWhatsAppStatus);
         }
         
         // Get current time to ensure fresh status
-        const now = new Date();
+        const now = Date.now();
         let clientInfo = null;
         let isAuthenticated = false;
+        let connectionState = 'DISCONNECTED';
+        let detailedState = {
+            hasInfo: false,
+            hasPage: false,
+            isClosed: true,
+            lastActivity: global.lastClientActivity || null,
+            isReconnecting: typeof client.isReconnecting !== 'undefined' ? client.isReconnecting : false,
+            qrAvailable: global.lastQrTimestamp ? true : false,
+            qrTimestamp: global.lastQrTimestamp || null
+        };
         
-        // Safely check client info
+        // Safely check client state
         try {
-            if (client && client.info) {
-                isAuthenticated = true;
-                clientInfo = {
-                    pushname: client.info.pushname || '',
-                    platform: client.info.platform || '',
-                    wid: client.info.wid ? client.info.wid._serialized : ''
-                };
+            // Attempt to use the checkClientConnection function if available for consistent status checks
+            if (typeof client.checkClientConnection === 'function') {
+                const isConnected = await client.checkClientConnection();
+                if (isConnected) {
+                    connectionState = 'CONNECTED';
+                    isAuthenticated = true;
+                }
+            } else {
+                // 1. Check if client exists and isn't null
+                if (client) {
+                    // 2. Check for Puppeteer page status
+                    if (client.pupPage) {
+                        detailedState.hasPage = true;
+                        try {
+                            detailedState.isClosed = client.pupPage.isClosed();
+                        } catch (e) {
+                            // If checking isClosed fails, assume it's closed
+                            detailedState.isClosed = true;
+                        }
+                    }
+                    
+                    // 3. Check client info
+                    if (client.info) {
+                        detailedState.hasInfo = true;
+                        isAuthenticated = true;
+                        clientInfo = {
+                            pushname: client.info.pushname || '',
+                            platform: client.info.platform || '',
+                            wid: client.info.wid ? client.info.wid._serialized : ''
+                        };
+                    }
+                    
+                    // 4. Try to get the explicit connection state if available
+                    try {
+                        connectionState = await client.getState();
+                        // Update the last activity timestamp whenever we get a valid state
+                        global.lastClientActivity = now;
+                    } catch (stateError) {
+                        // Only log the error if we expected the client to be connected
+                        if (isAuthenticated) {
+                            console.log('Error getting client state:', stateError.message);
+                        }
+                        connectionState = detailedState.hasInfo ? 'CONNECTED' : 'DISCONNECTED';
+                    }
+                }
             }
         } catch (clientError) {
             console.error('Error accessing client info:', clientError.message);
         }
         
+        // Handle phantom connection state (phone shows connected but web doesn't)
+        // This is common with WhatsApp Web and needs special handling
+        if (!isAuthenticated && global.lastClientActivity) {
+            // If we had activity in the last 30 minutes, we might be in phantom state
+            const minutesSinceActivity = (now - global.lastClientActivity) / (1000 * 60);
+            if (minutesSinceActivity < 30) {
+                console.log(`Potential phantom connection: Last activity was ${Math.round(minutesSinceActivity)} minutes ago`);
+                detailedState.phantomConnection = true;
+            }
+        }
+        
+        // Check if QR code file exists and get its stats
+        const qrFileInfo = await getQrFileInfo();
+        
         // Build status response object
         const status = {
             isAuthenticated: isAuthenticated,
+            connectionState: connectionState,
             info: clientInfo,
-            lastQrTimestamp: global.lastQrTimestamp || null,
-            qrAvailable: global.lastQrTimestamp ? true : false,
-            timestamp: now.toISOString(), // Add timestamp for debugging
-            serverTime: Date.now()
+            detailedState: detailedState,
+            timestamp: new Date(now).toISOString(),
+            serverTime: now,
+            qrFileExists: qrFileInfo.exists,
+            qrFileTime: qrFileInfo.mtime,
+            qrFileSize: qrFileInfo.size
         };
-        
-        // Check if QR code file exists and get its stats
-        let qrStatus = { qrFileExists: false };
-        try {
-            const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
-            if (fs.existsSync(qrPath)) {
-                const stats = fs.statSync(qrPath);
-                qrStatus.qrFileExists = true;
-                qrStatus.qrFileSize = stats.size;
-                qrStatus.qrFileTime = stats.mtime.toISOString();
-            }
-        } catch (error) {
-            qrStatus.qrFileError = error.message;
-        }
-        
-        // Merge QR status with main status
-        const fullStatus = { ...status, ...qrStatus };
         
         // Cache the status
         global.cachedWhatsAppStatus = {
-            ...fullStatus,
-            timestamp: Date.now() // Add cache timestamp
+            ...status,
+            timestamp: now // Add cache timestamp
         };
         
         // Return the status as JSON
-        return res.json(fullStatus);
-        
+        return res.json(status);
     } catch (error) {
-        // If any error occurs, still return a valid JSON response
-        console.error('Error generating status response:', error);
-        return res.json({
+        console.error('Error in WhatsApp status endpoint:', error);
+        return res.status(500).json({
             error: true,
-            message: 'Error generating status: ' + error.message,
-            timestamp: new Date().toISOString(),
-            serverTime: Date.now()
+            message: 'Error retrieving WhatsApp status: ' + error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     }
 });
+
+// Helper function to get QR file information
+async function getQrFileInfo() {
+    const result = { exists: false, size: 0, mtime: null };
+    
+    try {
+        const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+        if (fs.existsSync(qrPath)) {
+            const stats = fs.statSync(qrPath);
+            result.exists = true;
+            result.size = stats.size;
+            result.mtime = stats.mtime.toISOString();
+        }
+    } catch (error) {
+        console.log('Error checking QR file:', error.message);
+    }
+    
+    return result;
+}
 
 // WhatsApp QR code admin page
 app.get('/admin/whatsapp', requireAdmin, (req, res) => {
@@ -253,135 +319,43 @@ app.post('/admin/whatsapp/restart', requireAdmin, (req, res) => {
     });
 });
 
-// Replace the QR regeneration route with this crash-proof version
+// QR regeneration route
 app.post('/admin/whatsapp/regenerate-qr', requireAdmin, (req, res) => {
     console.log('Admin requested QR code regeneration');
     
-    // Send response immediately to prevent timeout
+    // Send response immediately
     res.json({
         success: true,
-        message: 'QR regeneration requested. The server will restart WhatsApp services. Please wait 60 seconds and then refresh the page.'
+        message: 'QR regeneration process started. This may take up to a minute to complete.'
     });
     
-    // Execute in separate context with error boundaries
+    // Perform the operation outside the request-response cycle
     setTimeout(async () => {
-        // Wrap everything in try/catch to prevent process crashes
         try {
-            console.log('Starting QR regeneration process...');
+            // Use client's destroy method to stop the current connection
+            await client.destroy().catch(e => console.log('Error during client destroy:', e.message));
+            console.log('Client destroyed for QR regeneration');
             
-            // Reset global state
-            if (global.lastQrGeneration) global.lastQrGeneration = 0;
-            if (global.qrRegenerationCount) global.qrRegenerationCount = 0;
-            global.lastQrTimestamp = null;
+            // Wait a bit before reinitializing
+            await new Promise(r => setTimeout(r, 5000));
             
-            // Track what we've attempted for better error recovery
-            let browserClosed = false;
-            let clientDestroyed = false;
-            
-            // Safely destroy the WhatsApp client
-            try {
-                console.log('Attempting to safely destroy WhatsApp client...');
+            // Try to use the centralized QR generation function if available
+            const botModule = require('./bot');
+            if (typeof botModule.generateQrCode === 'function') {
+                console.log('Using centralized QR generation function');
                 
-                // Safely handle browser closing
-                if (client.pupBrowser) {
-                    try {
-                        console.log('Closing Puppeteer browser...');
-                        const pages = await client.pupBrowser.pages().catch(() => []);
-                        
-                        // Close any open pages
-                        for (const page of pages) {
-                            try {
-                                await page.close().catch(() => {});
-                            } catch (e) {
-                                console.log('Page close error (non-fatal):', e.message);
-                            }
-                        }
-                        
-                        // Attempt to close browser
-                        try {
-                            await client.pupBrowser.close().catch(() => {});
-                            browserClosed = true;
-                            console.log('Browser closed successfully');
-                        } catch (e) {
-                            console.log('Browser close error (non-fatal):', e.message);
-                        }
-                    } catch (error) {
-                        console.log('Error accessing browser (non-fatal):', error.message);
-                    }
-                }
+                // Initialize the client to trigger QR generation
+                await client.initialize();
                 
-                // Wait a moment before destroy (racing condition protection)
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                // Try to destroy client if browser close failed or wasn't attempted
-                if (!browserClosed) {
-                    try {
-                        await client.destroy().catch(e => {
-                            console.log('Client destroy error (non-fatal):', e.message);
-                        });
-                        clientDestroyed = true;
-                        console.log('Client destroyed successfully');
-                    } catch (error) {
-                        console.log('Failed to destroy client (non-fatal):', error.message);
-                    }
-                } else {
-                    clientDestroyed = true; // If browser closed, consider client destroyed
-                }
-            } catch (outerError) {
-                console.error('Error during client cleanup (non-fatal):', outerError.message);
-            }
-            
-            // Wait to ensure everything is properly cleaned up
-            console.log('Waiting for 15 seconds before reinitializing...');
-            await new Promise(resolve => setTimeout(resolve, 15000));
-            
-            // Delete the QR file if it exists
-            try {
-                const qrPath = path.join(__dirname, 'public', 'latest-qr.png');
-                if (fs.existsSync(qrPath)) {
-                    fs.unlinkSync(qrPath);
-                    console.log('Deleted existing QR code file');
-                }
-            } catch (err) {
-                console.log('Error deleting QR file (non-fatal):', err.message);
-            }
-            
-            // Force garbage collection if available
-            if (global.gc) {
-                try {
-                    global.gc();
-                    console.log('Garbage collection completed');
-                } catch (e) {
-                    console.log('GC error (non-fatal):', e.message);
-                }
-            }
-            
-            // If we couldn't properly destroy things, we'll need to restart the server
-            // But first, let's try to initialize as a last resort
-            if (browserClosed || clientDestroyed) {
-                console.log('Client cleanup successful, attempting to initialize...');
-                
-                try {
-                    // Ensure null references to prevent errors
-                    if (!client.pupBrowser && !client.pupPage) {
-                        await client.initialize().catch(e => {
-                            console.error('Client initialization error (attempting recovery):', e.message);
-                            throw e; // Rethrow for outer catch
-                        });
-                        console.log('Client initialized successfully');
-                    } else {
-                        console.error('Client has browser/page references but should be destroyed, cannot initialize safely');
-                        throw new Error('Client not properly destroyed');
-                    }
-                } catch (initError) {
-                    // If initialization fails, suggest server restart
-                    console.error('Failed to initialize WhatsApp client, server restart may be required:', initError.message);
-                }
+                // Successful QR regeneration will be handled by the client's QR event
+                console.log('Client initialization started for QR regeneration');
             } else {
-                console.error('Failed to properly clean up WhatsApp client, server restart recommended');
+                // Fall back to the old method if the function is not available
+                console.log('Centralized QR generation function not found, falling back to standard initialization');
+                await client.initialize();
             }
-        } catch (outerError) {
-            console.error('Outer error in QR regeneration (non-fatal):', outerError.message);
+        } catch (error) {
+            console.error('Error during QR regeneration:', error);
         }
     }, 1000);
 });
@@ -1066,6 +1040,33 @@ exit 0
             
         } catch (outerError) {
             console.error('Outer error in complete WhatsApp reset:', outerError);
+        }
+    }, 1000);
+});
+
+// Add a force reconnect route
+app.post('/admin/whatsapp/force-reconnect', requireAdmin, (req, res) => {
+    console.log('Admin requested force reconnect for WhatsApp client');
+    
+    // Send response immediately to prevent timeouts
+    res.json({
+        success: true,
+        message: 'Force reconnect initiated. This may take up to 3 minutes to complete.'
+    });
+    
+    // Execute outside the request-response cycle
+    setTimeout(async () => {
+        try {
+            const botModule = require('./bot');
+            
+            if (typeof botModule.forceReconnect === 'function') {
+                const result = await botModule.forceReconnect();
+                console.log('Force reconnect completed with result:', result);
+            } else {
+                console.log('forceReconnect function not found in bot.js');
+            }
+        } catch (error) {
+            console.error('Error during force reconnect:', error);
         }
     }, 1000);
 });
