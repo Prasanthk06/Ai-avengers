@@ -950,48 +950,55 @@ app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
                 // Set to global scope
                 global.client = newClient;
                 
-                // Set up minimal event handlers
-                newClient.on('qr', (qr) => {
-                    try {
-                        // Generate terminal QR
-                        qrcode.generate(qr, { small: true });
-                        console.log('QR Code generated! Scan it with your WhatsApp');
-                        
-                        // Save QR code to file
+                // Load the bot module to access its functions
+                const botModule = require('./bot');
+                
+                // Set up event handlers using the bot's function
+                if (typeof botModule.setupClientEventHandlers === 'function') {
+                    botModule.setupClientEventHandlers(newClient);
+                    console.log('Client event handlers set up successfully');
+                } else {
+                    // Fallback to basic event handlers if function not available
+                    newClient.on('qr', (qr) => {
                         try {
-                            const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
-                            const qrCode = require('qr-image');
-                            const qrImg = qrCode.image(qr, { type: 'png' });
-                            const qrStream = fs.createWriteStream(qrPath);
+                            qrcode.generate(qr, { small: true });
+                            console.log('QR Code generated! Scan it with your WhatsApp');
                             
-                            qrImg.pipe(qrStream);
-                            
-                            // Set timestamp when ready
-                            qrStream.on('finish', () => {
-                                // Update global timestamp
-                                global.lastQrTimestamp = new Date().toISOString();
-                                console.log('QR Code saved to file after complete reset at:', global.lastQrTimestamp);
-                            });
-                            
-                            qrStream.on('error', (e) => {
-                                console.log('Error saving QR file:', e.message);
-                            });
-                        } catch (qrError) {
-                            console.log('Error creating QR file:', qrError.message);
+                            // Save QR code to file
+                            try {
+                                const qrPath = path.join(process.cwd(), 'public', 'latest-qr.png');
+                                const qrCode = require('qr-image');
+                                const qrImg = qrCode.image(qr, { type: 'png' });
+                                const qrStream = fs.createWriteStream(qrPath);
+                                
+                                qrImg.pipe(qrStream);
+                                
+                                // Set timestamp when ready
+                                qrStream.on('finish', () => {
+                                    // Update global timestamp
+                                    global.lastQrTimestamp = new Date().toISOString();
+                                    console.log('QR Code saved to file after complete reset at:', global.lastQrTimestamp);
+                                });
+                                
+                                qrStream.on('error', (e) => {
+                                    console.log('Error saving QR file:', e.message);
+                                });
+                            } catch (qrError) {
+                                console.log('Error creating QR file:', qrError.message);
+                            }
+                        } catch (e) {
+                            console.log('QR code generation error:', e.message);
                         }
-                    } catch (e) {
-                        console.log('QR code generation error:', e.message);
-                    }
-                });
-                
-                newClient.on('ready', () => {
-                    console.log('Client is ready after complete reset!');
-                });
-                
-                // Add error handling
-                newClient.on('disconnected', (reason) => {
-                    console.log('Client disconnected after reset:', reason);
-                });
+                    });
+                    
+                    newClient.on('ready', () => {
+                        console.log('Client is ready after complete reset!');
+                    });
+                    
+                    newClient.on('disconnected', (reason) => {
+                        console.log('Client disconnected after reset:', reason);
+                    });
+                }
                 
                 // Initialize the client
                 console.log('Initializing new WhatsApp client...');
@@ -1001,7 +1008,6 @@ app.post('/admin/whatsapp/complete-reset', requireAdmin, (req, res) => {
                 // Update the exported module without reassigning the constant
                 // This makes the new client available throughout the application
                 try {
-                    const botModule = require('./bot');
                     if (typeof botModule.updateClient === 'function') {
                         botModule.updateClient(newClient);
                         console.log('Successfully updated client reference in bot.js');
